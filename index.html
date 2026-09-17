@@ -14,9 +14,19 @@
   </div>
   <div class="project">
     <span class="project-label">Projekti</span>
-    <input id="project-name" type="text" value="Esimerkki asuinrakennuksen tarveselvitys">
+    <input id="project-name" type="text" value="Kulttuuri- ja kohtaamistalon tilaohjelma">
   </div>
   <div class="actions">
+    <div class="view-toggle" id="view-toggle" role="group" aria-label="Näkymä">
+      <button type="button" class="toggle-btn active" data-view="combined">Yhtenäinen</button>
+      <button type="button" class="toggle-btn" data-view="storeys">Kerroksittain</button>
+    </div>
+    <div class="storey-stepper" id="storey-stepper" title="Kerrosten määrä">
+      <span>Kerroksia</span>
+      <button type="button" id="storey-minus" class="stepper-btn">−</button>
+      <span id="storey-count">2</span>
+      <button type="button" id="storey-plus" class="stepper-btn">+</button>
+    </div>
     <button id="repack-btn" class="btn">Pakkaa uudelleen</button>
     <button id="export-btn" class="btn btn-primary">Vie</button>
   </div>
@@ -35,7 +45,8 @@
           <tr>
             <th>Huone</th>
             <th>m²</th>
-            <th>Tyyppi</th>
+            <th>Ryhmä</th>
+            <th>Kerros</th>
             <th></th>
           </tr>
         </thead>
@@ -46,37 +57,36 @@
     <form id="add-form" class="add-form">
       <input id="new-name" type="text" placeholder="Huoneen nimi" required>
       <input id="new-area" type="number" min="1" step="1" placeholder="m²" required>
-      <select id="new-type"></select>
+      <select id="new-cluster"></select>
+      <select id="new-storey"></select>
       <button type="submit" class="btn btn-small">Lisää</button>
     </form>
 
     <div class="quick-links">
-      <button id="load-sample" class="link-btn">Lataa esimerkki asuntoselvitys</button>
+      <button id="load-sample" class="link-btn">Palauta oletusaineisto</button>
       <button id="clear-all" class="link-btn">Tyhjennä kaikki</button>
     </div>
 
     <div class="legend-section">
       <button id="legend-toggle" class="legend-toggle" aria-expanded="true">
-        <span class="chevron">▼</span> Yhteystarpeet ja oletukset
+        <span class="chevron">▼</span> Ryhmät ja periaatteet
       </button>
       <div id="legend-body" class="legend-body">
-        <div id="type-legend" class="type-legend"></div>
+        <div id="cluster-legend" class="cluster-legend"></div>
         <ul class="assumptions">
-          <li>Keittiö avautuu olohuoneeseen.</li>
-          <li>Jokainen makuuhuone sijaitsee kylpyhuoneen lähellä.</li>
-          <li>Liikennetila toimii solmuna, joka yhdistää huoneet toisiinsa.</li>
-          <li>Kodinhoitohuone palvelee keittiötä.</li>
-          <li>Ulko- ja terassitilat liittyvät olohuoneeseen tai keittiöön.</li>
+          <li>Kukin toimintoryhmä (esim. Aula, Tapahtumatilat) saa oman värisävynsä, ja ryhmän tilat vaihtelevat saman sävyn sisällä.</li>
+          <li>Ryhmän suurin tila toimii solmuna, johon muut saman ryhmän tilat kytkeytyvät.</li>
+          <li>Kerroksittain-näkymä jakaa tilat omiin kaavioihinsa valitun kerrosjaon mukaan.</li>
         </ul>
       </div>
     </div>
   </aside>
 
   <main class="canvas-area">
-    <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div id="canvas-container" class="canvas-container"></div>
     <div id="empty-state" class="empty-state" hidden>
       <p>Ei huoneita vielä.</p>
-      <p>Lisää huone vasemmalta tai lataa esimerkkiaineisto.</p>
+      <p>Lisää huone vasemmalta tai palauta oletusaineisto.</p>
     </div>
   </main>
 </div>
