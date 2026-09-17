@@ -87,9 +87,12 @@
     projectName: "Kulttuuri- ja kohtaamistalon tilaohjelma",
     viewMode: "combined", // 'combined' | 'storeys'
     storeyCount: 2,
+    zoom: 1,
     positions: {}, // id -> {x, y, r}  (combined view)
     storeyPositions: {} // storeyNumber -> { id -> {x, y, r} }
   };
+
+  var ZOOM_MIN = 0.5, ZOOM_MAX = 2.5, ZOOM_STEP = 1.2;
 
   var nextId = 1;
   function makeId() { return "room-" + (nextId++) + "-" + Date.now().toString(36); }
@@ -102,6 +105,7 @@
         projectName: state.projectName,
         viewMode: state.viewMode,
         storeyCount: state.storeyCount,
+        zoom: state.zoom,
         positions: state.positions,
         storeyPositions: state.storeyPositions
       }));
@@ -118,6 +122,7 @@
       state.projectName = data.projectName || state.projectName;
       state.viewMode = data.viewMode === "storeys" ? "storeys" : "combined";
       state.storeyCount = data.storeyCount || 2;
+      state.zoom = typeof data.zoom === "number" ? Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, data.zoom)) : 1;
       state.positions = data.positions || {};
       state.storeyPositions = data.storeyPositions || {};
       return true;
@@ -321,10 +326,16 @@
     wrapper.appendChild(svg);
     canvasContainer.appendChild(wrapper);
 
+    var cx = d.width / 2, cy = d.height / 2;
+    var zoomGroup = svgEl("g", {
+      transform: "translate(" + cx + "," + cy + ") scale(" + state.zoom + ") translate(" + (-cx) + "," + (-cy) + ")"
+    });
+    svg.appendChild(zoomGroup);
+
     var linksLayer = svgEl("g");
     var bubblesLayer = svgEl("g");
-    svg.appendChild(linksLayer);
-    svg.appendChild(bubblesLayer);
+    zoomGroup.appendChild(linksLayer);
+    zoomGroup.appendChild(bubblesLayer);
 
     var positions = d.getPositions();
     var links = computeLinks(d.rooms);
@@ -379,7 +390,7 @@
         g.appendChild(label);
       }
 
-      g.addEventListener("pointerdown", function (evt) { startDrag(evt, svg, positions, r.id); });
+      g.addEventListener("pointerdown", function (evt) { startDrag(evt, svg, positions, r.id, cx, cy); });
       bubblesLayer.appendChild(g);
     });
   }
@@ -429,17 +440,32 @@
     });
   }
 
-  function startDrag(evt, svg, positions, id) {
+  // Converts a pointer event to diagram-local (unscaled) coordinates,
+  // inverting the zoom transform applied around (cx, cy).
+  function toLocalPoint(evt, svg, cx, cy) {
+    var rect = svg.getBoundingClientRect();
+    var lx = evt.clientX - rect.left;
+    var ly = evt.clientY - rect.top;
+    return {
+      x: cx + (lx - cx) / state.zoom,
+      y: cy + (ly - cy) / state.zoom,
+      rect: rect
+    };
+  }
+
+  function startDrag(evt, svg, positions, id, cx, cy) {
     evt.preventDefault();
     var pos = positions[id];
     if (!pos) return;
-    var rect = svg.getBoundingClientRect();
+    var local = toLocalPoint(evt, svg, cx, cy);
     dragging = {
       svg: svg,
       positions: positions,
       id: id,
-      offsetX: evt.clientX - rect.left - pos.x,
-      offsetY: evt.clientY - rect.top - pos.y
+      cx: cx,
+      cy: cy,
+      offsetX: local.x - pos.x,
+      offsetY: local.y - pos.y
     };
     window.addEventListener("pointermove", onDrag);
     window.addEventListener("pointerup", endDrag);
@@ -447,13 +473,13 @@
 
   function onDrag(evt) {
     if (!dragging) return;
-    var rect = dragging.svg.getBoundingClientRect();
+    var local = toLocalPoint(evt, dragging.svg, dragging.cx, dragging.cy);
     var pos = dragging.positions[dragging.id];
     var r = pos.r;
-    var x = evt.clientX - rect.left - dragging.offsetX;
-    var y = evt.clientY - rect.top - dragging.offsetY;
-    pos.x = Math.min(rect.width - r, Math.max(r, x));
-    pos.y = Math.min(rect.height - r, Math.max(r, y));
+    var x = local.x - dragging.offsetX;
+    var y = local.y - dragging.offsetY;
+    pos.x = Math.min(local.rect.width - r, Math.max(r, x));
+    pos.y = Math.min(local.rect.height - r, Math.max(r, y));
     updateBubblePositions(dragging.svg, dragging.positions, dragging.id);
   }
 
@@ -675,7 +701,7 @@
         if (!pa || !pb) return;
         g.appendChild(svgEl("line", {
           x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y,
-          stroke: "#b9b0a3", "stroke-width": "1", opacity: "0.6"
+          stroke: "#b9b0a3", "stroke-width": "5", "stroke-linecap": "round", opacity: "0.55"
         }));
       });
       d.rooms.forEach(function (r) {
@@ -782,6 +808,25 @@
   document.getElementById("storey-plus").addEventListener("click", function () { setStoreyCount(state.storeyCount + 1); });
   document.getElementById("storey-minus").addEventListener("click", function () { setStoreyCount(state.storeyCount - 1); });
 
+  var zoomLevelEl = document.getElementById("zoom-level");
+  function setZoom(z) {
+    z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+    if (z === state.zoom) return;
+    state.zoom = z;
+    zoomLevelEl.textContent = Math.round(z * 100) + " %";
+    render();
+    save();
+  }
+  document.getElementById("zoom-in").addEventListener("click", function () { setZoom(state.zoom * ZOOM_STEP); });
+  document.getElementById("zoom-out").addEventListener("click", function () { setZoom(state.zoom / ZOOM_STEP); });
+  document.getElementById("zoom-reset").addEventListener("click", function () { setZoom(1); });
+
+  canvasArea.addEventListener("wheel", function (e) {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    setZoom(state.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08));
+  }, { passive: false });
+
   var resizeTimer = null;
   window.addEventListener("resize", function () {
     clearTimeout(resizeTimer);
@@ -795,6 +840,7 @@
   if (load()) {
     document.getElementById("project-name").value = state.projectName;
     storeyCountEl.textContent = state.storeyCount;
+    zoomLevelEl.textContent = Math.round(state.zoom * 100) + " %";
     viewToggle.querySelectorAll(".toggle-btn").forEach(function (b) {
       b.classList.toggle("active", b.dataset.view === state.viewMode);
     });
