@@ -81,18 +81,22 @@
     ];
   }
 
-  var STORAGE_KEY = "kuplakaavio-data-fi-v2";
+  var STORAGE_KEY = "kuplakaavio-data-fi-v3";
   var state = {
     rooms: [],
     projectName: "Kulttuuri- ja kohtaamistalon tilaohjelma",
-    viewMode: "combined", // 'combined' | 'storeys'
+    viewMode: "combined",   // 'combined' | 'storeys'
+    shapeMode: "circles",   // 'circles' | 'interlock'
     storeyCount: 2,
-    zoom: 1,
-    positions: {}, // id -> {x, y, r}  (combined view)
-    storeyPositions: {} // storeyNumber -> { id -> {x, y, r} }
+    viewStates: {},         // diagram key -> {zoom, tx, ty}  (per-diagram pan/zoom)
+    positions: {},          // circles, combined: id -> {x, y, r}
+    storeyPositions: {},    // circles, per storey: storeyNumber -> { id -> {x, y, r} }
+    tiles: {},              // interlock, combined: id -> {path, labelX, labelY, bboxW, bboxH}
+    storeyTiles: {}         // interlock, per storey
   };
 
-  var ZOOM_MIN = 0.5, ZOOM_MAX = 2.5, ZOOM_STEP = 1.2;
+  var ZOOM_MIN = 0.4, ZOOM_MAX = 4;
+  var MARGIN_RATIO = 0.5; // extra pannable background on each side, relative to viewport size
 
   var nextId = 1;
   function makeId() { return "room-" + (nextId++) + "-" + Date.now().toString(36); }
@@ -104,12 +108,21 @@
         rooms: state.rooms,
         projectName: state.projectName,
         viewMode: state.viewMode,
+        shapeMode: state.shapeMode,
         storeyCount: state.storeyCount,
-        zoom: state.zoom,
+        viewStates: state.viewStates,
         positions: state.positions,
-        storeyPositions: state.storeyPositions
+        storeyPositions: state.storeyPositions,
+        tiles: state.tiles,
+        storeyTiles: state.storeyTiles
       }));
     } catch (e) { /* ignore quota / privacy errors */ }
+  }
+
+  var saveDebounceTimer = null;
+  function scheduleSave() {
+    clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = setTimeout(save, 300);
   }
 
   function load() {
@@ -121,10 +134,13 @@
       state.rooms = data.rooms;
       state.projectName = data.projectName || state.projectName;
       state.viewMode = data.viewMode === "storeys" ? "storeys" : "combined";
+      state.shapeMode = data.shapeMode === "interlock" ? "interlock" : "circles";
       state.storeyCount = data.storeyCount || 2;
-      state.zoom = typeof data.zoom === "number" ? Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, data.zoom)) : 1;
+      state.viewStates = data.viewStates || {};
       state.positions = data.positions || {};
       state.storeyPositions = data.storeyPositions || {};
+      state.tiles = data.tiles || {};
+      state.storeyTiles = data.storeyTiles || {};
       return true;
     } catch (e) { return false; }
   }
@@ -147,7 +163,7 @@
     return links;
   }
 
-  // ---------- Force-based circle packing ----------
+  // ---------- Layout A: force-based circle packing ----------
   function packLayout(rooms, width, height) {
     if (rooms.length === 0) return {};
 
@@ -229,6 +245,207 @@
     return positions;
   }
 
+  // ---------- Layout B: interlocking polyomino tiling ----------
+  // Rooms are grown from seeds (placed via the same clustering used for
+  // circle packing) as connected grid regions, competing cell-by-cell for
+  // territory until every room's quota is met or the grid is exhausted.
+  // Because two rooms' regions only ever meet at a shared cell edge, the
+  // result tiles the canvas with zero gaps — genuine interlocking shapes,
+  // including concave L/T/staircase footprints, not just circles.
+  function computeGridPlan(rooms, width, height) {
+    var totalArea = rooms.reduce(function (s, r) { return s + Math.max(r.area, 1); }, 0);
+    var targetCells = 3200;
+    var cellRealArea = totalArea / targetCells;
+    var quotas = {};
+    var neededTotal = 0;
+    rooms.forEach(function (r) {
+      var q = Math.max(1, Math.round(Math.max(r.area, 1) / cellRealArea));
+      quotas[r.id] = q;
+      neededTotal += q;
+    });
+    var inflated = Math.ceil(neededTotal * 1.18);
+    var aspect = width / Math.max(height, 1);
+    var cols = Math.max(6, Math.round(Math.sqrt(inflated * aspect)));
+    var rows = Math.max(6, Math.round(inflated / cols));
+    return { cols: cols, rows: rows, quotas: quotas };
+  }
+
+  // Traces the outer (and any inner) boundary of a set of grid cells into
+  // one or more closed rectilinear polygons, returned as an SVG path 'd'.
+  function cellsToPath(cells, has, cellW, cellH) {
+    var edges = [];
+    cells.forEach(function (cell) {
+      var c = cell.c, r = cell.r;
+      if (!has(c, r - 1)) edges.push({ x1: c, y1: r, x2: c + 1, y2: r });         // top
+      if (!has(c, r + 1)) edges.push({ x1: c + 1, y1: r + 1, x2: c, y2: r + 1 }); // bottom
+      if (!has(c - 1, r)) edges.push({ x1: c, y1: r + 1, x2: c, y2: r });         // left
+      if (!has(c + 1, r)) edges.push({ x1: c + 1, y1: r, x2: c + 1, y2: r + 1 }); // right
+    });
+
+    var fromMap = {};
+    edges.forEach(function (e, idx) {
+      var key = e.x1 + "," + e.y1;
+      (fromMap[key] = fromMap[key] || []).push(idx);
+    });
+
+    var visited = new Array(edges.length).fill(false);
+    var loops = [];
+    for (var i = 0; i < edges.length; i++) {
+      if (visited[i]) continue;
+      var loopPts = [];
+      var startKey = edges[i].x1 + "," + edges[i].y1;
+      var currentIdx = i;
+      var guard = 0;
+      while (guard++ < edges.length + 5) {
+        visited[currentIdx] = true;
+        var e = edges[currentIdx];
+        loopPts.push({ x: e.x1, y: e.y1 });
+        var nextKey = e.x2 + "," + e.y2;
+        if (nextKey === startKey) break;
+        var candidates = (fromMap[nextKey] || []).filter(function (idx) { return !visited[idx]; });
+        if (candidates.length === 0) break;
+        currentIdx = candidates[0];
+      }
+      if (loopPts.length >= 3) loops.push(loopPts);
+    }
+
+    loops = loops.map(function (pts) {
+      var n = pts.length;
+      var out = [];
+      for (var i = 0; i < n; i++) {
+        var prev = pts[(i - 1 + n) % n], cur = pts[i], next = pts[(i + 1) % n];
+        var collinear = (prev.x === cur.x && cur.x === next.x) || (prev.y === cur.y && cur.y === next.y);
+        if (!collinear) out.push(cur);
+      }
+      return out.length >= 3 ? out : pts;
+    });
+
+    return loops.map(function (pts) {
+      return "M " + pts.map(function (p) {
+        return (p.x * cellW).toFixed(1) + "," + (p.y * cellH).toFixed(1);
+      }).join(" L ") + " Z";
+    }).join(" ");
+  }
+
+  function tileLayout(rooms, width, height) {
+    if (rooms.length === 0) return {};
+
+    var plan = computeGridPlan(rooms, width, height);
+    var cols = plan.cols, rows = plan.rows, quotas = plan.quotas;
+    var cellW = width / cols, cellH = height / rows;
+
+    // Reuse the circle-packing simulation purely to get good seed centers:
+    // same-cluster rooms end up near each other, hubs central, exactly like
+    // the bubble view — the tiling just fills in the gaps between them.
+    var seedPositions = packLayout(rooms, width, height);
+
+    var occupied = new Array(rows);
+    for (var ri = 0; ri < rows; ri++) occupied[ri] = new Array(cols).fill(null);
+
+    function cellFree(c, r) {
+      return c >= 0 && c < cols && r >= 0 && r < rows && occupied[r][c] === null;
+    }
+
+    function nearestFreeCell(c0, r0) {
+      if (cellFree(c0, r0)) return { c: c0, r: r0 };
+      var maxRadius = cols + rows;
+      for (var radius = 1; radius < maxRadius; radius++) {
+        for (var dc = -radius; dc <= radius; dc++) {
+          var dr = radius - Math.abs(dc);
+          var rowOptions = dr === 0 ? [0] : [dr, -dr];
+          for (var k = 0; k < rowOptions.length; k++) {
+            var c = c0 + dc, r = r0 + rowOptions[k];
+            if (cellFree(c, r)) return { c: c, r: r };
+          }
+        }
+      }
+      return null;
+    }
+
+    function pushNeighbors(entry, c, r) {
+      [[c + 1, r], [c - 1, r], [c, r + 1], [c, r - 1]].forEach(function (nb) {
+        if (cellFree(nb[0], nb[1])) entry.frontier.push({ c: nb[0], r: nb[1] });
+      });
+    }
+
+    var active = [];
+    rooms.forEach(function (room) {
+      var sp = seedPositions[room.id];
+      if (!sp) return;
+      var c0 = Math.min(cols - 1, Math.max(0, Math.floor(sp.x / cellW)));
+      var r0 = Math.min(rows - 1, Math.max(0, Math.floor(sp.y / cellH)));
+      var seed = nearestFreeCell(c0, r0);
+      if (!seed) return;
+      occupied[seed.r][seed.c] = room.id;
+      var entry = { id: room.id, remaining: Math.max(0, quotas[room.id] - 1), frontier: [] };
+      pushNeighbors(entry, seed.c, seed.r);
+      active.push(entry);
+    });
+
+    var pending = active.filter(function (e) { return e.remaining > 0; });
+    while (pending.length > 0) {
+      for (var i = pending.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var tmp = pending[i]; pending[i] = pending[j]; pending[j] = tmp;
+      }
+      var next = [];
+      pending.forEach(function (entry) {
+        var claimed = null;
+        while (entry.frontier.length > 0) {
+          var cand = entry.frontier.shift();
+          if (cellFree(cand.c, cand.r)) { claimed = cand; break; }
+        }
+        if (claimed) {
+          occupied[claimed.r][claimed.c] = entry.id;
+          entry.remaining--;
+          pushNeighbors(entry, claimed.c, claimed.r);
+          if (entry.remaining > 0 && entry.frontier.length > 0) next.push(entry);
+        }
+      });
+      pending = next;
+    }
+
+    var cellsByRoom = {};
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var id = occupied[r][c];
+        if (id === null) continue;
+        (cellsByRoom[id] = cellsByRoom[id] || []).push({ c: c, r: r });
+      }
+    }
+
+    var result = {};
+    Object.keys(cellsByRoom).forEach(function (id) {
+      var cells = cellsByRoom[id];
+      var cellSet = {};
+      cells.forEach(function (cell) { cellSet[cell.c + "," + cell.r] = true; });
+      function has(c, r) { return !!cellSet[c + "," + r]; }
+
+      var sumX = 0, sumY = 0, minC = Infinity, maxC = -Infinity, minR = Infinity, maxR = -Infinity;
+      cells.forEach(function (cell) {
+        sumX += (cell.c + 0.5) * cellW;
+        sumY += (cell.r + 0.5) * cellH;
+        if (cell.c < minC) minC = cell.c;
+        if (cell.c > maxC) maxC = cell.c;
+        if (cell.r < minR) minR = cell.r;
+        if (cell.r > maxR) maxR = cell.r;
+      });
+
+      result[id] = {
+        path: cellsToPath(cells, has, cellW, cellH),
+        labelX: sumX / cells.length,
+        labelY: sumY / cells.length,
+        bboxW: (maxC - minC + 1) * cellW,
+        bboxH: (maxR - minR + 1) * cellH
+      };
+    });
+    return result;
+  }
+
+  function layoutFor(rooms, width, height) {
+    return state.shapeMode === "interlock" ? tileLayout(rooms, width, height) : packLayout(rooms, width, height);
+  }
+
   // ---------- Diagram descriptors (1 for combined view, N for storeys view) ----------
   var canvasArea = document.querySelector(".canvas-area");
   var canvasContainer = document.getElementById("canvas-container");
@@ -247,44 +464,89 @@
     return arr;
   }
 
+  function ensureViewState(key) {
+    if (!state.viewStates[key]) state.viewStates[key] = { zoom: 1, tx: 0, ty: 0 };
+    return state.viewStates[key];
+  }
+
   function buildDiagrams() {
     var size = containerSize();
+    var interlock = state.shapeMode === "interlock";
+
     if (state.viewMode === "combined") {
+      var store = interlock ? state.tiles : state.positions;
       return [{
         key: "combined",
         title: null,
         rooms: state.rooms,
         width: size.width,
         height: size.height,
-        getPositions: function () { return state.positions; },
-        setPositions: function (p) { state.positions = p; }
+        marginX: size.width * MARGIN_RATIO,
+        marginY: size.height * MARGIN_RATIO,
+        viewState: ensureViewState("combined"),
+        getLayout: function () { return store; },
+        setLayout: function (p) { store = p; if (interlock) state.tiles = p; else state.positions = p; }
       }];
     }
+
     var storeys = getStoreyNumbers();
     var n = Math.max(storeys.length, 1);
     var gap = 16;
     var panelWidth = Math.max((size.width - gap * (n - 1)) / n, 180);
     var panelHeight = Math.max(size.height - 46, 180);
     return storeys.map(function (s) {
-      if (!state.storeyPositions[s]) state.storeyPositions[s] = {};
+      var bucket = interlock ? state.storeyTiles : state.storeyPositions;
+      if (!bucket[s]) bucket[s] = {};
       return {
-        key: "storey-" + s,
+        key: (interlock ? "tile-storey-" : "storey-") + s,
         title: "Kerros " + s,
         rooms: state.rooms.filter(function (r) { return r.storey === s; }),
         width: panelWidth,
         height: panelHeight,
-        getPositions: function () { return state.storeyPositions[s]; },
-        setPositions: function (p) { state.storeyPositions[s] = p; }
+        marginX: panelWidth * MARGIN_RATIO,
+        marginY: panelHeight * MARGIN_RATIO,
+        viewState: ensureViewState((interlock ? "tile-storey-" : "storey-") + s),
+        getLayout: function () { return bucket[s]; },
+        setLayout: function (p) { bucket[s] = p; }
       };
     });
   }
 
   function repackAll() {
     buildDiagrams().forEach(function (d) {
-      d.setPositions(packLayout(d.rooms, d.width, d.height));
+      d.setLayout(layoutFor(d.rooms, d.width, d.height));
     });
     render();
     save();
+  }
+
+  // ---------- View transform helpers (pan + zoom, per diagram) ----------
+  function clampView(vs, d) {
+    var txMin = d.width - (d.width + d.marginX) * vs.zoom;
+    var txMax = d.marginX * vs.zoom;
+    vs.tx = txMin > txMax ? (txMin + txMax) / 2 : Math.min(txMax, Math.max(txMin, vs.tx));
+
+    var tyMin = d.height - (d.height + d.marginY) * vs.zoom;
+    var tyMax = d.marginY * vs.zoom;
+    vs.ty = tyMin > tyMax ? (tyMin + tyMax) / 2 : Math.min(tyMax, Math.max(tyMin, vs.ty));
+  }
+
+  function applyZoomAtPoint(vs, ax, ay, factor, d) {
+    var newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, vs.zoom * factor));
+    var realFactor = newZoom / vs.zoom;
+    vs.tx = ax * (1 - realFactor) + realFactor * vs.tx;
+    vs.ty = ay * (1 - realFactor) + realFactor * vs.ty;
+    vs.zoom = newZoom;
+    clampView(vs, d);
+  }
+
+  function transformString(vs) {
+    return "translate(" + vs.tx + "," + vs.ty + ") scale(" + vs.zoom + ")";
+  }
+
+  function updateTransform(svg, vs) {
+    var g = svg.querySelector(".zoom-group");
+    if (g) g.setAttribute("transform", transformString(vs));
   }
 
   // ---------- Rendering ----------
@@ -302,6 +564,8 @@
       subY: pos.y + (pos.r > 26 ? 16 : 10)
     };
   }
+
+  var dotPatternSeq = 0;
 
   function renderDiagram(d) {
     var wrapper = document.createElement("div");
@@ -326,48 +590,50 @@
     wrapper.appendChild(svg);
     canvasContainer.appendChild(wrapper);
 
-    var cx = d.width / 2, cy = d.height / 2;
-    var zoomGroup = svgEl("g", {
-      transform: "translate(" + cx + "," + cy + ") scale(" + state.zoom + ") translate(" + (-cx) + "," + (-cy) + ")"
-    });
+    var vs = d.viewState;
+
+    var patternId = "dots-" + (dotPatternSeq++);
+    var defs = svgEl("defs");
+    var pattern = svgEl("pattern", { id: patternId, width: 22, height: 22, patternUnits: "userSpaceOnUse" });
+    pattern.appendChild(svgEl("circle", { cx: 1.2, cy: 1.2, r: 1.2, fill: "#e3d8c8" }));
+    defs.appendChild(pattern);
+    svg.appendChild(defs);
+    svg.appendChild(svgEl("rect", { x: 0, y: 0, width: d.width, height: d.height, fill: "#faf5ef" }));
+
+    var zoomGroup = svgEl("g", { class: "zoom-group", transform: transformString(vs) });
     svg.appendChild(zoomGroup);
 
+    zoomGroup.appendChild(svgEl("rect", {
+      x: -d.marginX, y: -d.marginY,
+      width: d.width + d.marginX * 2, height: d.height + d.marginY * 2,
+      fill: "url(#" + patternId + ")"
+    }));
+
     var linksLayer = svgEl("g");
-    var bubblesLayer = svgEl("g");
+    var shapesLayer = svgEl("g");
     zoomGroup.appendChild(linksLayer);
-    zoomGroup.appendChild(bubblesLayer);
+    zoomGroup.appendChild(shapesLayer);
 
-    var positions = d.getPositions();
-    var links = computeLinks(d.rooms);
+    var layout = d.getLayout();
+    var interlock = state.shapeMode === "interlock";
 
-    links.forEach(function (l) {
-      var pa = positions[l.source], pb = positions[l.target];
-      if (!pa || !pb) return;
-      var line = svgEl("line", {
-        class: "link-line",
-        x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y
+    if (!interlock) {
+      computeLinks(d.rooms).forEach(function (l) {
+        var pa = layout[l.source], pb = layout[l.target];
+        if (!pa || !pb) return;
+        var line = svgEl("line", { class: "link-line", x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y });
+        line.dataset.source = l.source;
+        line.dataset.target = l.target;
+        linksLayer.appendChild(line);
       });
-      line.dataset.source = l.source;
-      line.dataset.target = l.target;
-      linksLayer.appendChild(line);
-    });
+    }
 
     d.rooms.forEach(function (r) {
-      var pos = positions[r.id];
-      if (!pos) return;
-      var g = svgEl("g", { class: "bubble-group", "data-id": r.id });
+      var item = layout[r.id];
+      if (!item) return;
       var cluster = clusterOf(r.cluster);
       var isTechnical = cluster.key === "tekniset";
-
-      var circleAttrs = {
-        cx: pos.x, cy: pos.y, r: pos.r,
-        fill: colorForRoom(r),
-        stroke: isTechnical ? "#726c62" : "rgba(0,0,0,0.15)",
-        "stroke-width": isTechnical ? "1.5" : "1"
-      };
-      if (isTechnical) circleAttrs["stroke-dasharray"] = "5 4";
-      var circle = svgEl("circle", circleAttrs);
-      circle.style.fillOpacity = "0.88";
+      var g = svgEl("g", { class: "bubble-group", "data-id": r.id });
 
       if (r.note) {
         var title = svgEl("title");
@@ -375,24 +641,85 @@
         g.appendChild(title);
       }
 
-      var lp = labelPositions(pos);
-      var label = svgEl("text", { class: "bubble-label", x: pos.x, y: lp.nameY });
-      label.textContent = r.name;
+      if (interlock) {
+        var pathAttrs = {
+          d: item.path,
+          fill: colorForRoom(r),
+          "fill-rule": "evenodd",
+          stroke: isTechnical ? "#726c62" : "#faf5ef",
+          "stroke-width": isTechnical ? "2.5" : "3"
+        };
+        if (isTechnical) pathAttrs["stroke-dasharray"] = "6 4";
+        var shape = svgEl("path", pathAttrs);
+        shape.style.fillOpacity = "0.92";
+        g.appendChild(shape);
 
-      var sub = svgEl("text", { class: "bubble-sublabel", x: pos.x, y: lp.subY });
-      sub.textContent = r.area + " m²";
+        // Clip labels to this room's own shape so text on small/irregular
+        // pieces never spills visually into a neighboring tile.
+        var clipId = "clip-" + r.id.replace(/[^a-zA-Z0-9_-]/g, "");
+        var clipPath = svgEl("clipPath", { id: clipId });
+        clipPath.appendChild(svgEl("path", { d: item.path, "fill-rule": "evenodd" }));
+        defs.appendChild(clipPath);
+        var labelGroup = svgEl("g", { "clip-path": "url(#" + clipId + ")" });
 
-      g.appendChild(circle);
-      if (pos.r >= 20) {
-        g.appendChild(label);
-        g.appendChild(sub);
-      } else if (pos.r >= 12) {
-        g.appendChild(label);
+        var minDim = Math.min(item.bboxW, item.bboxH);
+        if (minDim >= 40) {
+          var l1 = svgEl("text", { class: "bubble-label", x: item.labelX, y: item.labelY - 6 });
+          l1.textContent = r.name;
+          var l2 = svgEl("text", { class: "bubble-sublabel", x: item.labelX, y: item.labelY + 12 });
+          l2.textContent = r.area + " m²";
+          labelGroup.appendChild(l1);
+          labelGroup.appendChild(l2);
+        } else if (minDim >= 22) {
+          var l3 = svgEl("text", { class: "bubble-label", x: item.labelX, y: item.labelY + 4 });
+          l3.textContent = r.name;
+          labelGroup.appendChild(l3);
+        }
+        g.appendChild(labelGroup);
+      } else {
+        var circleAttrs = {
+          cx: item.x, cy: item.y, r: item.r,
+          fill: colorForRoom(r),
+          stroke: isTechnical ? "#726c62" : "rgba(0,0,0,0.15)",
+          "stroke-width": isTechnical ? "1.5" : "1"
+        };
+        if (isTechnical) circleAttrs["stroke-dasharray"] = "5 4";
+        var circle = svgEl("circle", circleAttrs);
+        circle.style.fillOpacity = "0.88";
+        g.appendChild(circle);
+
+        var lp = labelPositions(item);
+        var label = svgEl("text", { class: "bubble-label", x: item.x, y: lp.nameY });
+        label.textContent = r.name;
+        var sub = svgEl("text", { class: "bubble-sublabel", x: item.x, y: lp.subY });
+        sub.textContent = r.area + " m²";
+
+        if (item.r >= 20) {
+          g.appendChild(label);
+          g.appendChild(sub);
+        } else if (item.r >= 12) {
+          g.appendChild(label);
+        }
+
+        g.addEventListener("pointerdown", function (evt) { startDrag(evt, svg, layout, r.id, d); });
       }
 
-      g.addEventListener("pointerdown", function (evt) { startDrag(evt, svg, positions, r.id, cx, cy); });
-      bubblesLayer.appendChild(g);
+      shapesLayer.appendChild(g);
     });
+
+    // Scroll wheel always zooms (centered on the cursor); dragging empty
+    // canvas pans. Dragging a bubble (circles mode) stops this from firing.
+    svg.addEventListener("wheel", function (e) {
+      e.preventDefault();
+      var rect = svg.getBoundingClientRect();
+      var ax = e.clientX - rect.left, ay = e.clientY - rect.top;
+      var factor = Math.pow(1.0015, -e.deltaY);
+      applyZoomAtPoint(vs, ax, ay, factor, d);
+      updateTransform(svg, vs);
+      scheduleSave();
+    }, { passive: false });
+
+    svg.addEventListener("pointerdown", function (evt) { startPan(evt, svg, vs, d); });
   }
 
   function render() {
@@ -410,7 +737,35 @@
     updateLegend();
   }
 
-  // ---------- Drag ----------
+  // ---------- Panning (drag empty canvas) ----------
+  var panState = null;
+
+  function startPan(evt, svg, vs, d) {
+    panState = {
+      svg: svg, vs: vs, d: d,
+      startX: evt.clientX, startY: evt.clientY,
+      startTx: vs.tx, startTy: vs.ty
+    };
+    window.addEventListener("pointermove", onPan);
+    window.addEventListener("pointerup", endPan);
+  }
+
+  function onPan(evt) {
+    if (!panState) return;
+    panState.vs.tx = panState.startTx + (evt.clientX - panState.startX);
+    panState.vs.ty = panState.startTy + (evt.clientY - panState.startY);
+    clampView(panState.vs, panState.d);
+    updateTransform(panState.svg, panState.vs);
+  }
+
+  function endPan() {
+    window.removeEventListener("pointermove", onPan);
+    window.removeEventListener("pointerup", endPan);
+    if (panState) save();
+    panState = null;
+  }
+
+  // ---------- Dragging a single bubble (circles mode only) ----------
   var dragging = null;
 
   function updateBubblePositions(svg, positions, id) {
@@ -441,31 +796,26 @@
   }
 
   // Converts a pointer event to diagram-local (unscaled) coordinates,
-  // inverting the zoom transform applied around (cx, cy).
-  function toLocalPoint(evt, svg, cx, cy) {
+  // inverting the diagram's current pan + zoom transform.
+  function toLocalPoint(evt, svg, vs) {
     var rect = svg.getBoundingClientRect();
     var lx = evt.clientX - rect.left;
     var ly = evt.clientY - rect.top;
     return {
-      x: cx + (lx - cx) / state.zoom,
-      y: cy + (ly - cy) / state.zoom,
-      rect: rect
+      x: (lx - vs.tx) / vs.zoom,
+      y: (ly - vs.ty) / vs.zoom
     };
   }
 
-  function startDrag(evt, svg, positions, id, cx, cy) {
+  function startDrag(evt, svg, positions, id, d) {
     evt.preventDefault();
+    evt.stopPropagation(); // don't also start a canvas pan
     var pos = positions[id];
     if (!pos) return;
-    var local = toLocalPoint(evt, svg, cx, cy);
+    var local = toLocalPoint(evt, svg, d.viewState);
     dragging = {
-      svg: svg,
-      positions: positions,
-      id: id,
-      cx: cx,
-      cy: cy,
-      offsetX: local.x - pos.x,
-      offsetY: local.y - pos.y
+      svg: svg, positions: positions, id: id, d: d,
+      offsetX: local.x - pos.x, offsetY: local.y - pos.y
     };
     window.addEventListener("pointermove", onDrag);
     window.addEventListener("pointerup", endDrag);
@@ -473,13 +823,14 @@
 
   function onDrag(evt) {
     if (!dragging) return;
-    var local = toLocalPoint(evt, dragging.svg, dragging.cx, dragging.cy);
+    var local = toLocalPoint(evt, dragging.svg, dragging.d.viewState);
     var pos = dragging.positions[dragging.id];
     var r = pos.r;
     var x = local.x - dragging.offsetX;
     var y = local.y - dragging.offsetY;
-    pos.x = Math.min(local.rect.width - r, Math.max(r, x));
-    pos.y = Math.min(local.rect.height - r, Math.max(r, y));
+    var d = dragging.d;
+    pos.x = Math.min(d.width + d.marginX - r, Math.max(r - d.marginX, x));
+    pos.y = Math.min(d.height + d.marginY - r, Math.max(r - d.marginY, y));
     updateBubblePositions(dragging.svg, dragging.positions, dragging.id);
   }
 
@@ -636,9 +987,9 @@
   function removeRoom(id) {
     state.rooms = state.rooms.filter(function (r) { return r.id !== id; });
     delete state.positions[id];
-    Object.keys(state.storeyPositions).forEach(function (s) {
-      delete state.storeyPositions[s][id];
-    });
+    delete state.tiles[id];
+    Object.keys(state.storeyPositions).forEach(function (s) { delete state.storeyPositions[s][id]; });
+    Object.keys(state.storeyTiles).forEach(function (s) { delete state.storeyTiles[s][id]; });
     if (state.rooms.length === 0) {
       render();
       save();
@@ -652,11 +1003,18 @@
     repackAll();
   }
 
+  function resetViews() {
+    state.viewStates = {};
+  }
+
   function clearAll() {
     if (state.rooms.length && !window.confirm("Tyhjennetäänkö koko huoneohjelma?")) return;
     state.rooms = [];
     state.positions = {};
     state.storeyPositions = {};
+    state.tiles = {};
+    state.storeyTiles = {};
+    resetViews();
     render();
     save();
   }
@@ -666,25 +1024,25 @@
     state.storeyCount = 2;
     document.getElementById("storey-count").textContent = state.storeyCount;
     populateNewStoreySelect();
+    resetViews();
     repackAll();
   }
 
   function exportSvg() {
     var diagrams = buildDiagrams();
+    var interlock = state.shapeMode === "interlock";
     var gapX = 24;
     var titleHeight = state.viewMode === "storeys" ? 34 : 0;
     var totalWidth = diagrams.reduce(function (s, d) { return s + d.width; }, 0) + gapX * Math.max(diagrams.length - 1, 0);
     var totalHeight = Math.max.apply(null, diagrams.map(function (d) { return d.height; })) + titleHeight;
 
-    var out = svgEl("svg", {
-      xmlns: "http://www.w3.org/2000/svg",
-      width: totalWidth,
-      height: totalHeight
-    });
+    var out = svgEl("svg", { xmlns: "http://www.w3.org/2000/svg", width: totalWidth, height: totalHeight });
     out.appendChild(svgEl("rect", { x: 0, y: 0, width: totalWidth, height: totalHeight, fill: "#faf5ef" }));
+    var exportDefs = svgEl("defs");
+    out.appendChild(exportDefs);
 
     var xOffset = 0;
-    diagrams.forEach(function (d) {
+    diagrams.forEach(function (d, diagramIdx) {
       var g = svgEl("g", { transform: "translate(" + xOffset + "," + titleHeight + ")" });
       if (d.title) {
         var t = svgEl("text", { x: 0, y: -12, "font-size": "15", "font-weight": "700", fill: "#2c2622" });
@@ -695,39 +1053,75 @@
           return tg;
         })());
       }
-      var positions = d.getPositions();
-      computeLinks(d.rooms).forEach(function (l) {
-        var pa = positions[l.source], pb = positions[l.target];
-        if (!pa || !pb) return;
-        g.appendChild(svgEl("line", {
-          x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y,
-          stroke: "#b9b0a3", "stroke-width": "5", "stroke-linecap": "round", opacity: "0.55"
-        }));
-      });
+      var layout = d.getLayout();
+
+      if (!interlock) {
+        computeLinks(d.rooms).forEach(function (l) {
+          var pa = layout[l.source], pb = layout[l.target];
+          if (!pa || !pb) return;
+          g.appendChild(svgEl("line", {
+            x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y,
+            stroke: "#b9b0a3", "stroke-width": "5", "stroke-linecap": "round", opacity: "0.55"
+          }));
+        });
+      }
+
       d.rooms.forEach(function (r) {
-        var pos = positions[r.id];
-        if (!pos) return;
+        var item = layout[r.id];
+        if (!item) return;
         var cluster = clusterOf(r.cluster);
-        var circleAttrs = {
-          cx: pos.x, cy: pos.y, r: pos.r,
-          fill: colorForRoom(r), "fill-opacity": "0.88",
-          stroke: cluster.key === "tekniset" ? "#726c62" : "rgba(0,0,0,0.15)",
-          "stroke-width": cluster.key === "tekniset" ? "1.5" : "1"
-        };
-        if (cluster.key === "tekniset") circleAttrs["stroke-dasharray"] = "5 4";
-        g.appendChild(svgEl("circle", circleAttrs));
-        var lp = labelPositions(pos);
-        if (pos.r >= 20) {
-          var label = svgEl("text", { x: pos.x, y: lp.nameY, "text-anchor": "middle", "font-size": "13", "font-weight": "700", fill: "#2c2622" });
-          label.textContent = r.name;
-          var sub = svgEl("text", { x: pos.x, y: lp.subY, "text-anchor": "middle", "font-size": "11", fill: "#4a433c" });
-          sub.textContent = r.area + " m²";
-          g.appendChild(label);
-          g.appendChild(sub);
-        } else if (pos.r >= 12) {
-          var label2 = svgEl("text", { x: pos.x, y: pos.y + 4, "text-anchor": "middle", "font-size": "11", "font-weight": "700", fill: "#2c2622" });
-          label2.textContent = r.name;
-          g.appendChild(label2);
+        var isTechnical = cluster.key === "tekniset";
+
+        if (interlock) {
+          var pathAttrs = {
+            d: item.path, fill: colorForRoom(r), "fill-opacity": "0.92", "fill-rule": "evenodd",
+            stroke: isTechnical ? "#726c62" : "#faf5ef", "stroke-width": isTechnical ? "2.5" : "3"
+          };
+          if (isTechnical) pathAttrs["stroke-dasharray"] = "6 4";
+          g.appendChild(svgEl("path", pathAttrs));
+
+          var clipId = "export-clip-" + diagramIdx + "-" + r.id.replace(/[^a-zA-Z0-9_-]/g, "");
+          var clipPath = svgEl("clipPath", { id: clipId });
+          clipPath.appendChild(svgEl("path", { d: item.path, "fill-rule": "evenodd" }));
+          exportDefs.appendChild(clipPath);
+          var labelGroup = svgEl("g", { "clip-path": "url(#" + clipId + ")" });
+
+          var minDim = Math.min(item.bboxW, item.bboxH);
+          if (minDim >= 40) {
+            var l1 = svgEl("text", { x: item.labelX, y: item.labelY - 6, "text-anchor": "middle", "font-size": "13", "font-weight": "700", fill: "#2c2622" });
+            l1.textContent = r.name;
+            var l2 = svgEl("text", { x: item.labelX, y: item.labelY + 12, "text-anchor": "middle", "font-size": "11", fill: "#4a433c" });
+            l2.textContent = r.area + " m²";
+            labelGroup.appendChild(l1);
+            labelGroup.appendChild(l2);
+          } else if (minDim >= 22) {
+            var l3 = svgEl("text", { x: item.labelX, y: item.labelY + 4, "text-anchor": "middle", "font-size": "11", "font-weight": "700", fill: "#2c2622" });
+            l3.textContent = r.name;
+            labelGroup.appendChild(l3);
+          }
+          g.appendChild(labelGroup);
+        } else {
+          var circleAttrs = {
+            cx: item.x, cy: item.y, r: item.r,
+            fill: colorForRoom(r), "fill-opacity": "0.88",
+            stroke: isTechnical ? "#726c62" : "rgba(0,0,0,0.15)",
+            "stroke-width": isTechnical ? "1.5" : "1"
+          };
+          if (isTechnical) circleAttrs["stroke-dasharray"] = "5 4";
+          g.appendChild(svgEl("circle", circleAttrs));
+          var lp = labelPositions(item);
+          if (item.r >= 20) {
+            var label = svgEl("text", { x: item.x, y: lp.nameY, "text-anchor": "middle", "font-size": "13", "font-weight": "700", fill: "#2c2622" });
+            label.textContent = r.name;
+            var sub = svgEl("text", { x: item.x, y: lp.subY, "text-anchor": "middle", "font-size": "11", fill: "#4a433c" });
+            sub.textContent = r.area + " m²";
+            g.appendChild(label);
+            g.appendChild(sub);
+          } else if (item.r >= 12) {
+            var label2 = svgEl("text", { x: item.x, y: item.y + 4, "text-anchor": "middle", "font-size": "11", "font-weight": "700", fill: "#2c2622" });
+            label2.textContent = r.name;
+            g.appendChild(label2);
+          }
         }
       });
       out.appendChild(g);
@@ -793,6 +1187,19 @@
     repackAll();
   });
 
+  var shapeToggle = document.getElementById("shape-toggle");
+  shapeToggle.addEventListener("click", function (e) {
+    var btn = e.target.closest(".toggle-btn");
+    if (!btn) return;
+    var mode = btn.dataset.shape;
+    if (mode === state.shapeMode) return;
+    state.shapeMode = mode;
+    shapeToggle.querySelectorAll(".toggle-btn").forEach(function (b) {
+      b.classList.toggle("active", b === btn);
+    });
+    repackAll();
+  });
+
   var storeyCountEl = document.getElementById("storey-count");
   function setStoreyCount(n) {
     n = Math.max(1, Math.min(8, n));
@@ -808,24 +1215,11 @@
   document.getElementById("storey-plus").addEventListener("click", function () { setStoreyCount(state.storeyCount + 1); });
   document.getElementById("storey-minus").addEventListener("click", function () { setStoreyCount(state.storeyCount - 1); });
 
-  var zoomLevelEl = document.getElementById("zoom-level");
-  function setZoom(z) {
-    z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
-    if (z === state.zoom) return;
-    state.zoom = z;
-    zoomLevelEl.textContent = Math.round(z * 100) + " %";
+  document.getElementById("zoom-reset").addEventListener("click", function () {
+    resetViews();
     render();
     save();
-  }
-  document.getElementById("zoom-in").addEventListener("click", function () { setZoom(state.zoom * ZOOM_STEP); });
-  document.getElementById("zoom-out").addEventListener("click", function () { setZoom(state.zoom / ZOOM_STEP); });
-  document.getElementById("zoom-reset").addEventListener("click", function () { setZoom(1); });
-
-  canvasArea.addEventListener("wheel", function (e) {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    setZoom(state.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08));
-  }, { passive: false });
+  });
 
   var resizeTimer = null;
   window.addEventListener("resize", function () {
@@ -840,14 +1234,20 @@
   if (load()) {
     document.getElementById("project-name").value = state.projectName;
     storeyCountEl.textContent = state.storeyCount;
-    zoomLevelEl.textContent = Math.round(state.zoom * 100) + " %";
     viewToggle.querySelectorAll(".toggle-btn").forEach(function (b) {
       b.classList.toggle("active", b.dataset.view === state.viewMode);
     });
+    shapeToggle.querySelectorAll(".toggle-btn").forEach(function (b) {
+      b.classList.toggle("active", b.dataset.shape === state.shapeMode);
+    });
     populateNewStoreySelect();
-    var needsPack = state.rooms.length > 0 &&
-      (state.viewMode === "combined" ? Object.keys(state.positions).length === 0 : getStoreyNumbers().every(function (s) { return !state.storeyPositions[s] || Object.keys(state.storeyPositions[s]).length === 0; }));
-    if (needsPack) {
+    var currentLayoutEmpty = state.viewMode === "combined"
+      ? Object.keys(state.shapeMode === "interlock" ? state.tiles : state.positions).length === 0
+      : getStoreyNumbers().every(function (s) {
+        var bucket = state.shapeMode === "interlock" ? state.storeyTiles : state.storeyPositions;
+        return !bucket[s] || Object.keys(bucket[s]).length === 0;
+      });
+    if (state.rooms.length > 0 && currentLayoutEmpty) {
       repackAll();
     } else {
       render();

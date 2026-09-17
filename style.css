@@ -149,18 +149,6 @@ body {
   color: var(--ink);
 }
 
-#zoom-level {
-  min-width: 40px;
-  text-align: center;
-  font-weight: 700;
-  color: var(--ink);
-}
-
-.zoom-reset-btn {
-  font-size: 11px;
-  margin-left: 2px;
-}
-
 .btn {
   border: 1px solid var(--border);
   background: var(--paper);
@@ -440,8 +428,6 @@ body {
   flex: 1;
   position: relative;
   background-color: var(--cream);
-  background-image: radial-gradient(circle, #e3d8c8 1px, transparent 1px);
-  background-size: 22px 22px;
   overflow: hidden;
 }
 
@@ -485,7 +471,11 @@ body {
 .bubble-svg {
   display: block;
   min-height: 0;
+  cursor: grab;
+  touch-action: none;
 }
+
+.bubble-svg:active { cursor: grabbing; }
 
 .bubble-group { cursor: grab; }
 .bubble-group:active { cursor: grabbing; }

@@ -21,19 +21,18 @@
       <button type="button" class="toggle-btn active" data-view="combined">Yhtenäinen</button>
       <button type="button" class="toggle-btn" data-view="storeys">Kerroksittain</button>
     </div>
+    <div class="view-toggle" id="shape-toggle" role="group" aria-label="Muoto">
+      <button type="button" class="toggle-btn active" data-shape="circles">Kuplat</button>
+      <button type="button" class="toggle-btn" data-shape="interlock">Palapeli</button>
+    </div>
     <div class="storey-stepper" id="storey-stepper" title="Kerrosten määrä">
       <span>Kerroksia</span>
       <button type="button" id="storey-minus" class="stepper-btn">−</button>
       <span id="storey-count">2</span>
       <button type="button" id="storey-plus" class="stepper-btn">+</button>
     </div>
-    <div class="storey-stepper" id="zoom-controls" title="Zoomaus">
-      <button type="button" id="zoom-out" class="stepper-btn">−</button>
-      <span id="zoom-level">100 %</span>
-      <button type="button" id="zoom-in" class="stepper-btn">+</button>
-      <button type="button" id="zoom-reset" class="link-btn zoom-reset-btn">Nollaa</button>
-    </div>
-    <button id="repack-btn" class="btn">Pakkaa uudelleen</button>
+    <button id="zoom-reset" class="btn" title="Palauta zoomaus ja sijainti oletukseen">Nollaa näkymä</button>
+    <button id="repack-btn" class="btn">Järjestä uudelleen</button>
     <button id="export-btn" class="btn btn-primary">Vie</button>
   </div>
 </header>
@@ -83,6 +82,8 @@
           <li>Kukin toimintoryhmä (esim. Aula, Tapahtumatilat) saa oman värisävynsä, ja ryhmän tilat vaihtelevat saman sävyn sisällä.</li>
           <li>Ryhmän suurin tila toimii solmuna, johon muut saman ryhmän tilat kytkeytyvät.</li>
           <li>Kerroksittain-näkymä jakaa tilat omiin kaavioihinsa valitun kerrosjaon mukaan.</li>
+          <li>Palapeli-muoto laskee tiloille toisiinsa lomittuvat, aukottomat muodot (myös L-kirjaimen mallisia) pinta-alojen mukaan; muotoja ei voi raahata käsin, vaan "Järjestä uudelleen" laskee ne uusiksi.</li>
+          <li>Hiiren rullalla zoomaa kursorin kohdalta, ja tyhjää kangasta raahaamalla siirtää näkymää.</li>
         </ul>
       </div>
     </div>
