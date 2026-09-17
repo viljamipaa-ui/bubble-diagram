@@ -3,7 +3,9 @@
 
   // ---------- Room groups (clusters) ----------
   // Each cluster gets its own hue; individual rooms vary in lightness within
-  // that hue family so the grouping reads clearly at a glance.
+  // that hue family so the grouping reads clearly at a glance. Colors here
+  // are just the defaults — the user can override any cluster's color from
+  // the sidebar legend (stored in state.clusterColors).
   var CLUSTERS = [
     { key: "aula", label: "Aula ja yleisön palvelutilat", hue: 16, sat: 58, light: 56 },
     { key: "vuokrattavat", label: "Vuokrattavat palvelutilat", hue: 42, sat: 62, light: 55 },
@@ -19,14 +21,61 @@
     return CLUSTERS[CLUSTERS.length - 1];
   }
 
+  function clusterColorBase(key) {
+    var override = state.clusterColors[key];
+    if (override) return override;
+    var base = clusterOf(key);
+    return { hue: base.hue, sat: base.sat, light: base.light };
+  }
+
   var SHADE_OFFSETS = [0, -9, 7, -15, 13, -5, 10];
   function colorForRoom(room) {
-    var cluster = clusterOf(room.cluster);
+    var base = clusterColorBase(room.cluster);
     var group = state.rooms.filter(function (r) { return r.cluster === room.cluster; });
     var idx = group.findIndex(function (r) { return r.id === room.id; });
     var offset = SHADE_OFFSETS[((idx % SHADE_OFFSETS.length) + SHADE_OFFSETS.length) % SHADE_OFFSETS.length];
-    var light = Math.min(80, Math.max(26, cluster.light + offset));
-    return "hsl(" + cluster.hue + " " + cluster.sat + "% " + light + "%)";
+    var light = Math.min(80, Math.max(26, base.light + offset));
+    return "hsl(" + base.hue + " " + base.sat + "% " + light + "%)";
+  }
+
+  function hexToHsl(hex) {
+    hex = hex.replace("#", "");
+    var r = parseInt(hex.substr(0, 2), 16) / 255;
+    var g = parseInt(hex.substr(2, 2), 16) / 255;
+    var b = parseInt(hex.substr(4, 2), 16) / 255;
+    var max = Math.max(r, g, b), min = Math.min(r, g, b);
+    var h = 0, s = 0, l = (max + min) / 2;
+    if (max !== min) {
+      var d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+      else if (max === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h /= 6;
+    }
+    return { hue: Math.round(h * 360), sat: Math.round(s * 100), light: Math.round(l * 100) };
+  }
+
+  function hslToHex(hue, sat, light) {
+    var h = hue / 360, s = sat / 100, l = light / 100, r, g, b;
+    if (s === 0) { r = g = b = l; }
+    else {
+      var hue2rgb = function (p, q, t) {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1 / 6) return p + (q - p) * 6 * t;
+        if (t < 1 / 2) return q;
+        if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+        return p;
+      };
+      var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+      var p = 2 * l - q;
+      r = hue2rgb(p, q, h + 1 / 3);
+      g = hue2rgb(p, q, h);
+      b = hue2rgb(p, q, h - 1 / 3);
+    }
+    function toHex(x) { var v = Math.round(x * 255).toString(16); return v.length === 1 ? "0" + v : v; }
+    return "#" + toHex(r) + toHex(g) + toHex(b);
   }
 
   // ---------- Default room programme ----------
@@ -81,18 +130,27 @@
     ];
   }
 
-  var STORAGE_KEY = "kuplakaavio-data-fi-v3";
+  // Waste from the retail units also routes through Jätehuone — a real
+  // cross-cluster functional link, shown by default alongside the
+  // auto-generated same-cluster connections.
+  function defaultCustomLinks() {
+    return [{ id: "link-default-1", a: "d28", b: "d10" }];
+  }
+
+  var STORAGE_KEY = "kuplakaavio-data-fi-v4";
   var state = {
     rooms: [],
     projectName: "Kulttuuri- ja kohtaamistalon tilaohjelma",
     viewMode: "combined",   // 'combined' | 'storeys'
-    shapeMode: "circles",   // 'circles' | 'interlock'
+    shapeMode: "circles",   // 'circles' | 'rects'
     storeyCount: 2,
+    clusterColors: {},      // cluster key -> {hue, sat, light} override
+    customLinks: [],        // [{id, a: roomId, b: roomId}]
     viewStates: {},         // diagram key -> {zoom, tx, ty}  (per-diagram pan/zoom)
     positions: {},          // circles, combined: id -> {x, y, r}
     storeyPositions: {},    // circles, per storey: storeyNumber -> { id -> {x, y, r} }
-    tiles: {},              // interlock, combined: id -> {path, labelX, labelY, bboxW, bboxH}
-    storeyTiles: {}         // interlock, per storey
+    tiles: {},              // rects, combined: id -> {x, y, w, h}, plus __k (m² per px²)
+    storeyTiles: {}         // rects, per storey
   };
 
   var ZOOM_MIN = 0.4, ZOOM_MAX = 4;
@@ -110,6 +168,8 @@
         viewMode: state.viewMode,
         shapeMode: state.shapeMode,
         storeyCount: state.storeyCount,
+        clusterColors: state.clusterColors,
+        customLinks: state.customLinks,
         viewStates: state.viewStates,
         positions: state.positions,
         storeyPositions: state.storeyPositions,
@@ -125,6 +185,11 @@
     saveDebounceTimer = setTimeout(save, 300);
   }
 
+  function isOldTileFormat(bucket) {
+    var key = Object.keys(bucket || {}).filter(function (k) { return k !== "__k"; })[0];
+    return !!(key && bucket[key] && typeof bucket[key].path === "string");
+  }
+
   function load() {
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
@@ -134,18 +199,26 @@
       state.rooms = data.rooms;
       state.projectName = data.projectName || state.projectName;
       state.viewMode = data.viewMode === "storeys" ? "storeys" : "combined";
-      state.shapeMode = data.shapeMode === "interlock" ? "interlock" : "circles";
+      state.shapeMode = data.shapeMode === "rects" ? "rects" : "circles";
       state.storeyCount = data.storeyCount || 2;
+      state.clusterColors = data.clusterColors && typeof data.clusterColors === "object" ? data.clusterColors : {};
+      state.customLinks = Array.isArray(data.customLinks) ? data.customLinks : [];
       state.viewStates = data.viewStates || {};
       state.positions = data.positions || {};
       state.storeyPositions = data.storeyPositions || {};
       state.tiles = data.tiles || {};
       state.storeyTiles = data.storeyTiles || {};
+      // Migrate away from an older (polyomino-path) tile format.
+      if (isOldTileFormat(state.tiles)) state.tiles = {};
+      Object.keys(state.storeyTiles).forEach(function (s) {
+        if (isOldTileFormat(state.storeyTiles[s])) state.storeyTiles[s] = {};
+      });
       return true;
     } catch (e) { return false; }
   }
 
-  // ---------- Adjacency: hub-and-spoke within each cluster ----------
+  // ---------- Adjacency ----------
+  // Automatic: hub-and-spoke within each cluster (largest room is the hub).
   function computeLinks(rooms) {
     var byCluster = {};
     rooms.forEach(function (r) {
@@ -161,6 +234,19 @@
       });
     });
     return links;
+  }
+
+  // Automatic cluster links plus any user-drawn custom links (e.g. a waste
+  // room serving spaces outside its own cluster) — not restricted to
+  // same-cluster pairs.
+  function computeAllLinks(rooms) {
+    var ids = {};
+    rooms.forEach(function (r) { ids[r.id] = true; });
+    var auto = computeLinks(rooms).map(function (l) { return { source: l.source, target: l.target, custom: false }; });
+    var custom = state.customLinks
+      .filter(function (l) { return ids[l.a] && ids[l.b]; })
+      .map(function (l) { return { source: l.a, target: l.b, custom: true }; });
+    return auto.concat(custom);
   }
 
   // ---------- Layout A: force-based circle packing ----------
@@ -188,7 +274,7 @@
     var byId = {};
     nodes.forEach(function (n) { byId[n.id] = n; });
 
-    var links = computeLinks(rooms).filter(function (l) { return byId[l.source] && byId[l.target]; });
+    var links = computeAllLinks(rooms).filter(function (l) { return byId[l.source] && byId[l.target]; });
 
     var iterations = 400;
     var padding = 6;
@@ -245,205 +331,69 @@
     return positions;
   }
 
-  // ---------- Layout B: interlocking polyomino tiling ----------
-  // Rooms are grown from seeds (placed via the same clustering used for
-  // circle packing) as connected grid regions, competing cell-by-cell for
-  // territory until every room's quota is met or the grid is exhausted.
-  // Because two rooms' regions only ever meet at a shared cell edge, the
-  // result tiles the canvas with zero gaps — genuine interlocking shapes,
-  // including concave L/T/staircase footprints, not just circles.
-  function computeGridPlan(rooms, width, height) {
-    var totalArea = rooms.reduce(function (s, r) { return s + Math.max(r.area, 1); }, 0);
-    var targetCells = 3200;
-    var cellRealArea = totalArea / targetCells;
-    var quotas = {};
-    var neededTotal = 0;
-    rooms.forEach(function (r) {
-      var q = Math.max(1, Math.round(Math.max(r.area, 1) / cellRealArea));
-      quotas[r.id] = q;
-      neededTotal += q;
-    });
-    var inflated = Math.ceil(neededTotal * 1.18);
-    var aspect = width / Math.max(height, 1);
-    var cols = Math.max(6, Math.round(Math.sqrt(inflated * aspect)));
-    var rows = Math.max(6, Math.round(inflated / cols));
-    return { cols: cols, rows: rows, quotas: quotas };
-  }
+  // ---------- Layout B: rectangular treemap (straight lines, zero gaps) ----------
+  // Recursively splits a rectangle between two groups of items in proportion
+  // to their combined value, always along the rectangle's longer side. Used
+  // twice: once to carve the canvas into per-cluster zones, then again
+  // inside each zone to carve out the individual rooms.
+  function splitTreemap(items, x, y, w, h, out) {
+    if (items.length === 0) return;
+    if (items.length === 1) { out[items[0].id] = { x: x, y: y, w: w, h: h }; return; }
 
-  // Traces the outer (and any inner) boundary of a set of grid cells into
-  // one or more closed rectilinear polygons, returned as an SVG path 'd'.
-  function cellsToPath(cells, has, cellW, cellH) {
-    var edges = [];
-    cells.forEach(function (cell) {
-      var c = cell.c, r = cell.r;
-      if (!has(c, r - 1)) edges.push({ x1: c, y1: r, x2: c + 1, y2: r });         // top
-      if (!has(c, r + 1)) edges.push({ x1: c + 1, y1: r + 1, x2: c, y2: r + 1 }); // bottom
-      if (!has(c - 1, r)) edges.push({ x1: c, y1: r + 1, x2: c, y2: r });         // left
-      if (!has(c + 1, r)) edges.push({ x1: c + 1, y1: r, x2: c + 1, y2: r + 1 }); // right
-    });
+    var sorted = items.slice().sort(function (a, b) { return b.value - a.value; });
+    var total = sorted.reduce(function (s, i) { return s + i.value; }, 0);
+    if (total <= 0) { out[sorted[0].id] = { x: x, y: y, w: w, h: h }; return; }
 
-    var fromMap = {};
-    edges.forEach(function (e, idx) {
-      var key = e.x1 + "," + e.y1;
-      (fromMap[key] = fromMap[key] || []).push(idx);
-    });
-
-    var visited = new Array(edges.length).fill(false);
-    var loops = [];
-    for (var i = 0; i < edges.length; i++) {
-      if (visited[i]) continue;
-      var loopPts = [];
-      var startKey = edges[i].x1 + "," + edges[i].y1;
-      var currentIdx = i;
-      var guard = 0;
-      while (guard++ < edges.length + 5) {
-        visited[currentIdx] = true;
-        var e = edges[currentIdx];
-        loopPts.push({ x: e.x1, y: e.y1 });
-        var nextKey = e.x2 + "," + e.y2;
-        if (nextKey === startKey) break;
-        var candidates = (fromMap[nextKey] || []).filter(function (idx) { return !visited[idx]; });
-        if (candidates.length === 0) break;
-        currentIdx = candidates[0];
-      }
-      if (loopPts.length >= 3) loops.push(loopPts);
+    var cum = 0, splitIdx = 0;
+    for (var i = 0; i < sorted.length; i++) {
+      cum += sorted[i].value;
+      if (cum >= total / 2) { splitIdx = i; break; }
     }
+    if (splitIdx >= sorted.length - 1) splitIdx = sorted.length - 2;
+    if (splitIdx < 0) splitIdx = 0;
 
-    loops = loops.map(function (pts) {
-      var n = pts.length;
-      var out = [];
-      for (var i = 0; i < n; i++) {
-        var prev = pts[(i - 1 + n) % n], cur = pts[i], next = pts[(i + 1) % n];
-        var collinear = (prev.x === cur.x && cur.x === next.x) || (prev.y === cur.y && cur.y === next.y);
-        if (!collinear) out.push(cur);
-      }
-      return out.length >= 3 ? out : pts;
-    });
+    var groupA = sorted.slice(0, splitIdx + 1);
+    var groupB = sorted.slice(splitIdx + 1);
+    var fracA = groupA.reduce(function (s, i) { return s + i.value; }, 0) / total;
 
-    return loops.map(function (pts) {
-      return "M " + pts.map(function (p) {
-        return (p.x * cellW).toFixed(1) + "," + (p.y * cellH).toFixed(1);
-      }).join(" L ") + " Z";
-    }).join(" ");
+    if (w >= h) {
+      var wA = w * fracA;
+      splitTreemap(groupA, x, y, wA, h, out);
+      splitTreemap(groupB, x + wA, y, w - wA, h, out);
+    } else {
+      var hA = h * fracA;
+      splitTreemap(groupA, x, y, w, hA, out);
+      splitTreemap(groupB, x, y + hA, w, h - hA, out);
+    }
   }
 
-  function tileLayout(rooms, width, height) {
+  function rectLayout(rooms, width, height) {
     if (rooms.length === 0) return {};
 
-    var plan = computeGridPlan(rooms, width, height);
-    var cols = plan.cols, rows = plan.rows, quotas = plan.quotas;
-    var cellW = width / cols, cellH = height / rows;
+    var totalArea = rooms.reduce(function (s, r) { return s + Math.max(r.area, 1); }, 0);
+    var k = totalArea / Math.max(width * height, 1); // m² per px²
 
-    // Reuse the circle-packing simulation purely to get good seed centers:
-    // same-cluster rooms end up near each other, hubs central, exactly like
-    // the bubble view — the tiling just fills in the gaps between them.
-    var seedPositions = packLayout(rooms, width, height);
-
-    var occupied = new Array(rows);
-    for (var ri = 0; ri < rows; ri++) occupied[ri] = new Array(cols).fill(null);
-
-    function cellFree(c, r) {
-      return c >= 0 && c < cols && r >= 0 && r < rows && occupied[r][c] === null;
-    }
-
-    function nearestFreeCell(c0, r0) {
-      if (cellFree(c0, r0)) return { c: c0, r: r0 };
-      var maxRadius = cols + rows;
-      for (var radius = 1; radius < maxRadius; radius++) {
-        for (var dc = -radius; dc <= radius; dc++) {
-          var dr = radius - Math.abs(dc);
-          var rowOptions = dr === 0 ? [0] : [dr, -dr];
-          for (var k = 0; k < rowOptions.length; k++) {
-            var c = c0 + dc, r = r0 + rowOptions[k];
-            if (cellFree(c, r)) return { c: c, r: r };
-          }
-        }
-      }
-      return null;
-    }
-
-    function pushNeighbors(entry, c, r) {
-      [[c + 1, r], [c - 1, r], [c, r + 1], [c, r - 1]].forEach(function (nb) {
-        if (cellFree(nb[0], nb[1])) entry.frontier.push({ c: nb[0], r: nb[1] });
-      });
-    }
-
-    var active = [];
-    rooms.forEach(function (room) {
-      var sp = seedPositions[room.id];
-      if (!sp) return;
-      var c0 = Math.min(cols - 1, Math.max(0, Math.floor(sp.x / cellW)));
-      var r0 = Math.min(rows - 1, Math.max(0, Math.floor(sp.y / cellH)));
-      var seed = nearestFreeCell(c0, r0);
-      if (!seed) return;
-      occupied[seed.r][seed.c] = room.id;
-      var entry = { id: room.id, remaining: Math.max(0, quotas[room.id] - 1), frontier: [] };
-      pushNeighbors(entry, seed.c, seed.r);
-      active.push(entry);
+    var byCluster = {};
+    rooms.forEach(function (r) { (byCluster[r.cluster] = byCluster[r.cluster] || []).push(r); });
+    var clusterItems = Object.keys(byCluster).map(function (key) {
+      return { id: key, value: byCluster[key].reduce(function (s, r) { return s + Math.max(r.area, 1); }, 0) };
     });
 
-    var pending = active.filter(function (e) { return e.remaining > 0; });
-    while (pending.length > 0) {
-      for (var i = pending.length - 1; i > 0; i--) {
-        var j = Math.floor(Math.random() * (i + 1));
-        var tmp = pending[i]; pending[i] = pending[j]; pending[j] = tmp;
-      }
-      var next = [];
-      pending.forEach(function (entry) {
-        var claimed = null;
-        while (entry.frontier.length > 0) {
-          var cand = entry.frontier.shift();
-          if (cellFree(cand.c, cand.r)) { claimed = cand; break; }
-        }
-        if (claimed) {
-          occupied[claimed.r][claimed.c] = entry.id;
-          entry.remaining--;
-          pushNeighbors(entry, claimed.c, claimed.r);
-          if (entry.remaining > 0 && entry.frontier.length > 0) next.push(entry);
-        }
-      });
-      pending = next;
-    }
-
-    var cellsByRoom = {};
-    for (var r = 0; r < rows; r++) {
-      for (var c = 0; c < cols; c++) {
-        var id = occupied[r][c];
-        if (id === null) continue;
-        (cellsByRoom[id] = cellsByRoom[id] || []).push({ c: c, r: r });
-      }
-    }
+    var clusterRects = {};
+    splitTreemap(clusterItems, 0, 0, width, height, clusterRects);
 
     var result = {};
-    Object.keys(cellsByRoom).forEach(function (id) {
-      var cells = cellsByRoom[id];
-      var cellSet = {};
-      cells.forEach(function (cell) { cellSet[cell.c + "," + cell.r] = true; });
-      function has(c, r) { return !!cellSet[c + "," + r]; }
-
-      var sumX = 0, sumY = 0, minC = Infinity, maxC = -Infinity, minR = Infinity, maxR = -Infinity;
-      cells.forEach(function (cell) {
-        sumX += (cell.c + 0.5) * cellW;
-        sumY += (cell.r + 0.5) * cellH;
-        if (cell.c < minC) minC = cell.c;
-        if (cell.c > maxC) maxC = cell.c;
-        if (cell.r < minR) minR = cell.r;
-        if (cell.r > maxR) maxR = cell.r;
-      });
-
-      result[id] = {
-        path: cellsToPath(cells, has, cellW, cellH),
-        labelX: sumX / cells.length,
-        labelY: sumY / cells.length,
-        bboxW: (maxC - minC + 1) * cellW,
-        bboxH: (maxR - minR + 1) * cellH
-      };
+    Object.keys(byCluster).forEach(function (key) {
+      var rect = clusterRects[key];
+      var items = byCluster[key].map(function (r) { return { id: r.id, value: Math.max(r.area, 1) }; });
+      splitTreemap(items, rect.x, rect.y, rect.w, rect.h, result);
     });
+    result.__k = k;
     return result;
   }
 
   function layoutFor(rooms, width, height) {
-    return state.shapeMode === "interlock" ? tileLayout(rooms, width, height) : packLayout(rooms, width, height);
+    return state.shapeMode === "rects" ? rectLayout(rooms, width, height) : packLayout(rooms, width, height);
   }
 
   // ---------- Diagram descriptors (1 for combined view, N for storeys view) ----------
@@ -471,10 +421,10 @@
 
   function buildDiagrams() {
     var size = containerSize();
-    var interlock = state.shapeMode === "interlock";
+    var isRects = state.shapeMode === "rects";
 
     if (state.viewMode === "combined") {
-      var store = interlock ? state.tiles : state.positions;
+      var store = isRects ? state.tiles : state.positions;
       return [{
         key: "combined",
         title: null,
@@ -485,7 +435,7 @@
         marginY: size.height * MARGIN_RATIO,
         viewState: ensureViewState("combined"),
         getLayout: function () { return store; },
-        setLayout: function (p) { store = p; if (interlock) state.tiles = p; else state.positions = p; }
+        setLayout: function (p) { store = p; if (isRects) state.tiles = p; else state.positions = p; }
       }];
     }
 
@@ -495,17 +445,17 @@
     var panelWidth = Math.max((size.width - gap * (n - 1)) / n, 180);
     var panelHeight = Math.max(size.height - 46, 180);
     return storeys.map(function (s) {
-      var bucket = interlock ? state.storeyTiles : state.storeyPositions;
+      var bucket = isRects ? state.storeyTiles : state.storeyPositions;
       if (!bucket[s]) bucket[s] = {};
       return {
-        key: (interlock ? "tile-storey-" : "storey-") + s,
+        key: (isRects ? "tile-storey-" : "storey-") + s,
         title: "Kerros " + s,
         rooms: state.rooms.filter(function (r) { return r.storey === s; }),
         width: panelWidth,
         height: panelHeight,
         marginX: panelWidth * MARGIN_RATIO,
         marginY: panelHeight * MARGIN_RATIO,
-        viewState: ensureViewState((interlock ? "tile-storey-" : "storey-") + s),
+        viewState: ensureViewState((isRects ? "tile-storey-" : "storey-") + s),
         getLayout: function () { return bucket[s]; },
         setLayout: function (p) { bucket[s] = p; }
       };
@@ -515,6 +465,21 @@
   function repackAll() {
     buildDiagrams().forEach(function (d) {
       d.setLayout(layoutFor(d.rooms, d.width, d.height));
+    });
+    render();
+    save();
+  }
+
+  // Redraws using whatever layout each diagram already has, only computing
+  // a fresh one where a room has no entry yet (e.g. a brand new room, or
+  // the first time this shape/view combination has ever been shown).
+  // This is what makes toggling Kuplat/Pohjapiirros or Yhtenäinen/
+  // Kerroksittain remember prior placement instead of re-rolling it.
+  function ensureLayouts() {
+    buildDiagrams().forEach(function (d) {
+      var layout = d.getLayout();
+      var stale = d.rooms.some(function (r) { return !layout[r.id]; });
+      if (stale) d.setLayout(layoutFor(d.rooms, d.width, d.height));
     });
     render();
     save();
@@ -615,18 +580,21 @@
     zoomGroup.appendChild(shapesLayer);
 
     var layout = d.getLayout();
-    var interlock = state.shapeMode === "interlock";
+    var isRects = state.shapeMode === "rects";
 
-    if (!interlock) {
-      computeLinks(d.rooms).forEach(function (l) {
-        var pa = layout[l.source], pb = layout[l.target];
-        if (!pa || !pb) return;
-        var line = svgEl("line", { class: "link-line", x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y });
-        line.dataset.source = l.source;
-        line.dataset.target = l.target;
-        linksLayer.appendChild(line);
+    computeAllLinks(d.rooms).forEach(function (l) {
+      var pa = layout[l.source], pb = layout[l.target];
+      if (!pa || !pb) return;
+      var cxA = isRects ? pa.x + pa.w / 2 : pa.x, cyA = isRects ? pa.y + pa.h / 2 : pa.y;
+      var cxB = isRects ? pb.x + pb.w / 2 : pb.x, cyB = isRects ? pb.y + pb.h / 2 : pb.y;
+      var line = svgEl("line", {
+        class: l.custom ? "link-line link-line-custom" : "link-line",
+        x1: cxA, y1: cyA, x2: cxB, y2: cyB
       });
-    }
+      line.dataset.source = l.source;
+      line.dataset.target = l.target;
+      linksLayer.appendChild(line);
+    });
 
     d.rooms.forEach(function (r) {
       var item = layout[r.id];
@@ -641,41 +609,62 @@
         g.appendChild(title);
       }
 
-      if (interlock) {
-        var pathAttrs = {
-          d: item.path,
-          fill: colorForRoom(r),
-          "fill-rule": "evenodd",
-          stroke: isTechnical ? "#726c62" : "#faf5ef",
-          "stroke-width": isTechnical ? "2.5" : "3"
-        };
-        if (isTechnical) pathAttrs["stroke-dasharray"] = "6 4";
-        var shape = svgEl("path", pathAttrs);
-        shape.style.fillOpacity = "0.92";
-        g.appendChild(shape);
-
-        // Clip labels to this room's own shape so text on small/irregular
-        // pieces never spills visually into a neighboring tile.
+      if (isRects) {
+        var rect = item;
+        var pad = 1.5;
         var clipId = "clip-" + r.id.replace(/[^a-zA-Z0-9_-]/g, "");
         var clipPath = svgEl("clipPath", { id: clipId });
-        clipPath.appendChild(svgEl("path", { d: item.path, "fill-rule": "evenodd" }));
+        var clipRectEl = svgEl("rect", { x: rect.x, y: rect.y, width: rect.w, height: rect.h });
+        clipPath.appendChild(clipRectEl);
         defs.appendChild(clipPath);
-        var labelGroup = svgEl("g", { "clip-path": "url(#" + clipId + ")" });
+        g.__clipRectEl = clipRectEl;
 
-        var minDim = Math.min(item.bboxW, item.bboxH);
-        if (minDim >= 40) {
-          var l1 = svgEl("text", { class: "bubble-label", x: item.labelX, y: item.labelY - 6 });
-          l1.textContent = r.name;
-          var l2 = svgEl("text", { class: "bubble-sublabel", x: item.labelX, y: item.labelY + 12 });
-          l2.textContent = r.area + " m²";
-          labelGroup.appendChild(l1);
-          labelGroup.appendChild(l2);
-        } else if (minDim >= 22) {
-          var l3 = svgEl("text", { class: "bubble-label", x: item.labelX, y: item.labelY + 4 });
-          l3.textContent = r.name;
-          labelGroup.appendChild(l3);
-        }
+        var rectAttrs = {
+          class: "room-rect",
+          x: rect.x + pad, y: rect.y + pad,
+          width: Math.max(0, rect.w - pad * 2), height: Math.max(0, rect.h - pad * 2),
+          fill: colorForRoom(r),
+          stroke: isTechnical ? "#726c62" : "rgba(0,0,0,0.18)",
+          "stroke-width": isTechnical ? "2" : "1.5"
+        };
+        if (isTechnical) rectAttrs["stroke-dasharray"] = "6 4";
+        var rectEl = svgEl("rect", rectAttrs);
+        rectEl.style.fillOpacity = "0.9";
+        g.appendChild(rectEl);
+
+        var cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+        var labelGroup = svgEl("g", { "clip-path": "url(#" + clipId + ")" });
+        var l1 = svgEl("text", { class: "bubble-label", x: cx, y: cy - 6 });
+        l1.textContent = r.name;
+        var l2 = svgEl("text", { class: "bubble-sublabel", x: cx, y: cy + 12 });
+        l2.textContent = r.area + " m²";
+        labelGroup.appendChild(l1);
+        labelGroup.appendChild(l2);
         g.appendChild(labelGroup);
+
+        rectEl.addEventListener("pointerdown", function (evt) { startRectMove(evt, svg, layout, r.id, d); });
+
+        if (Math.min(rect.w, rect.h) >= 16) {
+          // Treemap corners are often shared by 2-4 rooms at the exact same
+          // point. Nudging each room's own handle inward from its corner
+          // (instead of drawing it exactly on the shared point) keeps every
+          // room's handle a separate, clickable target instead of only the
+          // topmost one in the DOM being reachable.
+          var nudgeX = Math.min(7, rect.w / 4), nudgeY = Math.min(7, rect.h / 4);
+          [
+            { k: "tl", x: rect.x + nudgeX, y: rect.y + nudgeY },
+            { k: "tr", x: rect.x + rect.w - nudgeX, y: rect.y + nudgeY },
+            { k: "bl", x: rect.x + nudgeX, y: rect.y + rect.h - nudgeY },
+            { k: "br", x: rect.x + rect.w - nudgeX, y: rect.y + rect.h - nudgeY }
+          ].forEach(function (c) {
+            var handle = svgEl("rect", {
+              class: "resize-handle", "data-corner": c.k,
+              x: c.x - 4.5, y: c.y - 4.5, width: 9, height: 9
+            });
+            handle.addEventListener("pointerdown", function (evt) { startResize(evt, svg, layout, r.id, c.k, d); });
+            g.appendChild(handle);
+          });
+        }
       } else {
         var circleAttrs = {
           cx: item.x, cy: item.y, r: item.r,
@@ -708,7 +697,7 @@
     });
 
     // Scroll wheel always zooms (centered on the cursor); dragging empty
-    // canvas pans. Dragging a bubble (circles mode) stops this from firing.
+    // canvas pans. Dragging a room shape stops this from firing.
     svg.addEventListener("wheel", function (e) {
       e.preventDefault();
       var rect = svg.getBoundingClientRect();
@@ -765,7 +754,19 @@
     panState = null;
   }
 
-  // ---------- Dragging a single bubble (circles mode only) ----------
+  // Converts a pointer event to diagram-local (unscaled) coordinates,
+  // inverting the diagram's current pan + zoom transform.
+  function toLocalPoint(evt, svg, vs) {
+    var rect = svg.getBoundingClientRect();
+    var lx = evt.clientX - rect.left;
+    var ly = evt.clientY - rect.top;
+    return {
+      x: (lx - vs.tx) / vs.zoom,
+      y: (ly - vs.ty) / vs.zoom
+    };
+  }
+
+  // ---------- Dragging a circle (circles mode) ----------
   var dragging = null;
 
   function updateBubblePositions(svg, positions, id) {
@@ -795,18 +796,6 @@
     });
   }
 
-  // Converts a pointer event to diagram-local (unscaled) coordinates,
-  // inverting the diagram's current pan + zoom transform.
-  function toLocalPoint(evt, svg, vs) {
-    var rect = svg.getBoundingClientRect();
-    var lx = evt.clientX - rect.left;
-    var ly = evt.clientY - rect.top;
-    return {
-      x: (lx - vs.tx) / vs.zoom,
-      y: (ly - vs.ty) / vs.zoom
-    };
-  }
-
   function startDrag(evt, svg, positions, id, d) {
     evt.preventDefault();
     evt.stopPropagation(); // don't also start a canvas pan
@@ -814,8 +803,63 @@
     if (!pos) return;
     var local = toLocalPoint(evt, svg, d.viewState);
     dragging = {
-      svg: svg, positions: positions, id: id, d: d,
+      kind: "circle", svg: svg, positions: positions, id: id, d: d,
       offsetX: local.x - pos.x, offsetY: local.y - pos.y
+    };
+    window.addEventListener("pointermove", onDrag);
+    window.addEventListener("pointerup", endDrag);
+  }
+
+  // ---------- Dragging / resizing a rectangle (rects mode) ----------
+  function updateRectVisual(svg, layout, id) {
+    var rect = layout[id];
+    if (!rect) return;
+    var g = svg.querySelector('[data-id="' + id + '"]');
+    if (!g) return;
+    var pad = 1.5;
+    var rectEl = g.querySelector(".room-rect");
+    if (rectEl) {
+      rectEl.setAttribute("x", rect.x + pad);
+      rectEl.setAttribute("y", rect.y + pad);
+      rectEl.setAttribute("width", Math.max(0, rect.w - pad * 2));
+      rectEl.setAttribute("height", Math.max(0, rect.h - pad * 2));
+    }
+    var cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+    var texts = g.querySelectorAll("text");
+    var room = state.rooms.find(function (r) { return r.id === id; });
+    if (texts[0]) { texts[0].setAttribute("x", cx); texts[0].setAttribute("y", cy - 6); }
+    if (texts[1]) {
+      texts[1].setAttribute("x", cx);
+      texts[1].setAttribute("y", cy + 12);
+      if (room) texts[1].textContent = room.area + " m²";
+    }
+    if (g.__clipRectEl) {
+      g.__clipRectEl.setAttribute("x", rect.x);
+      g.__clipRectEl.setAttribute("y", rect.y);
+      g.__clipRectEl.setAttribute("width", rect.w);
+      g.__clipRectEl.setAttribute("height", rect.h);
+    }
+    var nudgeX = Math.min(7, rect.w / 4), nudgeY = Math.min(7, rect.h / 4);
+    var coords = {
+      tl: [rect.x + nudgeX, rect.y + nudgeY], tr: [rect.x + rect.w - nudgeX, rect.y + nudgeY],
+      bl: [rect.x + nudgeX, rect.y + rect.h - nudgeY], br: [rect.x + rect.w - nudgeX, rect.y + rect.h - nudgeY]
+    };
+    g.querySelectorAll(".resize-handle").forEach(function (h) {
+      var c = coords[h.dataset.corner];
+      h.setAttribute("x", c[0] - 4.5);
+      h.setAttribute("y", c[1] - 4.5);
+    });
+  }
+
+  function startRectMove(evt, svg, layout, id, d) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    var rect = layout[id];
+    if (!rect) return;
+    var local = toLocalPoint(evt, svg, d.viewState);
+    dragging = {
+      kind: "rect-move", svg: svg, layout: layout, id: id, d: d,
+      offsetX: local.x - rect.x, offsetY: local.y - rect.y
     };
     window.addEventListener("pointermove", onDrag);
     window.addEventListener("pointerup", endDrag);
@@ -824,14 +868,19 @@
   function onDrag(evt) {
     if (!dragging) return;
     var local = toLocalPoint(evt, dragging.svg, dragging.d.viewState);
-    var pos = dragging.positions[dragging.id];
-    var r = pos.r;
-    var x = local.x - dragging.offsetX;
-    var y = local.y - dragging.offsetY;
     var d = dragging.d;
-    pos.x = Math.min(d.width + d.marginX - r, Math.max(r - d.marginX, x));
-    pos.y = Math.min(d.height + d.marginY - r, Math.max(r - d.marginY, y));
-    updateBubblePositions(dragging.svg, dragging.positions, dragging.id);
+    if (dragging.kind === "circle") {
+      var pos = dragging.positions[dragging.id];
+      var r = pos.r;
+      pos.x = Math.min(d.width + d.marginX - r, Math.max(r - d.marginX, local.x - dragging.offsetX));
+      pos.y = Math.min(d.height + d.marginY - r, Math.max(r - d.marginY, local.y - dragging.offsetY));
+      updateBubblePositions(dragging.svg, dragging.positions, dragging.id);
+    } else if (dragging.kind === "rect-move") {
+      var rect = dragging.layout[dragging.id];
+      rect.x = Math.min(d.width + d.marginX - rect.w, Math.max(-d.marginX, local.x - dragging.offsetX));
+      rect.y = Math.min(d.height + d.marginY - rect.h, Math.max(-d.marginY, local.y - dragging.offsetY));
+      updateRectVisual(dragging.svg, dragging.layout, dragging.id);
+    }
   }
 
   function endDrag() {
@@ -841,12 +890,104 @@
     dragging = null;
   }
 
-  // ---------- Sidebar: table, legend, summary ----------
+  var resizing = null;
+
+  function startResize(evt, svg, layout, id, corner, d) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    var rect = layout[id];
+    if (!rect) return;
+    resizing = {
+      svg: svg, layout: layout, id: id, corner: corner, d: d,
+      orig: { x: rect.x, y: rect.y, w: rect.w, h: rect.h }
+    };
+    window.addEventListener("pointermove", onResize);
+    window.addEventListener("pointerup", endResize);
+  }
+
+  function onResize(evt) {
+    if (!resizing) return;
+    var d = resizing.d;
+    var local = toLocalPoint(evt, resizing.svg, d.viewState);
+    var o = resizing.orig;
+    var minSize = 12;
+    var px = Math.min(d.width + d.marginX, Math.max(-d.marginX, local.x));
+    var py = Math.min(d.height + d.marginY, Math.max(-d.marginY, local.y));
+    var left = o.x, top = o.y, right = o.x + o.w, bottom = o.y + o.h;
+
+    if (resizing.corner === "tl") { left = Math.min(px, right - minSize); top = Math.min(py, bottom - minSize); }
+    else if (resizing.corner === "tr") { right = Math.max(px, left + minSize); top = Math.min(py, bottom - minSize); }
+    else if (resizing.corner === "bl") { left = Math.min(px, right - minSize); bottom = Math.max(py, top + minSize); }
+    else { right = Math.max(px, left + minSize); bottom = Math.max(py, top + minSize); }
+
+    var rect = resizing.layout[resizing.id];
+    rect.x = left; rect.y = top; rect.w = right - left; rect.h = bottom - top;
+
+    var k = resizing.layout.__k || 1;
+    var room = state.rooms.find(function (rm) { return rm.id === resizing.id; });
+    if (room) room.area = Math.max(1, Math.round(rect.w * rect.h * k));
+
+    updateRectVisual(resizing.svg, resizing.layout, resizing.id);
+    scheduleUiRefresh();
+  }
+
+  function endResize() {
+    window.removeEventListener("pointermove", onResize);
+    window.removeEventListener("pointerup", endResize);
+    if (resizing) save();
+    resizing = null;
+  }
+
+  var uiRefreshPending = false;
+  function scheduleUiRefresh() {
+    if (uiRefreshPending) return;
+    uiRefreshPending = true;
+    requestAnimationFrame(function () {
+      uiRefreshPending = false;
+      updateSummary();
+      updateTable();
+      updateLegend();
+    });
+  }
+
+  // Editing a room's m² directly (sidebar table): in rects mode this
+  // rescales that one rectangle in place (keeping its center fixed) so the
+  // change is reflected geometrically without disturbing other rooms; in
+  // circles mode it's simplest to just repack, since a circle's radius is
+  // derived from every room's area together.
+  function applyAreaChange(room, newArea) {
+    room.area = Math.max(1, Math.round(newArea));
+    if (state.shapeMode === "rects") {
+      buildDiagrams().forEach(function (d) {
+        var layout = d.getLayout();
+        var rect = layout[room.id];
+        if (!rect) return;
+        var k = layout.__k || 1;
+        var targetPx = room.area / k;
+        var curPx = rect.w * rect.h;
+        var scale = curPx > 0 ? Math.sqrt(targetPx / curPx) : 1;
+        var cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+        rect.w = Math.max(12, rect.w * scale);
+        rect.h = Math.max(12, rect.h * scale);
+        rect.x = cx - rect.w / 2;
+        rect.y = cy - rect.h / 2;
+      });
+      render();
+      save();
+    } else {
+      repackAll();
+    }
+  }
+
+  // ---------- Sidebar: table, legend, summary, custom links ----------
   var tbody = document.getElementById("room-tbody");
   var summaryEl = document.getElementById("room-summary");
   var clusterLegend = document.getElementById("cluster-legend");
   var newClusterSelect = document.getElementById("new-cluster");
   var newStoreySelect = document.getElementById("new-storey");
+  var linkRoomA = document.getElementById("link-room-a");
+  var linkRoomB = document.getElementById("link-room-b");
+  var customLinksList = document.getElementById("custom-links-list");
 
   function updateSummary() {
     var count = state.rooms.length;
@@ -876,7 +1017,8 @@
       titleWrap.className = "group-title";
       var dot = document.createElement("span");
       dot.className = "type-dot";
-      dot.style.background = "hsl(" + cluster.hue + " " + cluster.sat + "% " + cluster.light + "%)";
+      var colorBase = clusterColorBase(cluster.key);
+      dot.style.background = "hsl(" + colorBase.hue + " " + colorBase.sat + "% " + colorBase.light + "%)";
       var label = document.createElement("span");
       label.textContent = cluster.label;
       var totalArea = rooms.reduce(function (s, r) { return s + Number(r.area || 0); }, 0);
@@ -903,7 +1045,18 @@
 
           var tdArea = document.createElement("td");
           tdArea.className = "area";
-          tdArea.textContent = r.area;
+          var areaInput = document.createElement("input");
+          areaInput.type = "number";
+          areaInput.min = "1";
+          areaInput.className = "area-input";
+          areaInput.value = r.area;
+          areaInput.title = "Muokkaa pinta-alaa";
+          areaInput.addEventListener("change", function () {
+            var v = parseInt(areaInput.value, 10);
+            if (!v || v <= 0) { areaInput.value = r.area; return; }
+            applyAreaChange(r, v);
+          });
+          tdArea.appendChild(areaInput);
 
           var tdType = document.createElement("td");
           tdType.className = "type";
@@ -941,6 +1094,9 @@
           tbody.appendChild(tr);
         });
     });
+
+    populateLinkRoomSelects();
+    updateCustomLinksList();
   }
 
   function updateLegend() {
@@ -949,19 +1105,29 @@
       var rooms = state.rooms.filter(function (r) { return r.cluster === cluster.key; });
       if (rooms.length === 0) return;
       var totalArea = rooms.reduce(function (s, r) { return s + Number(r.area || 0); }, 0);
+      var colorBase = clusterColorBase(cluster.key);
 
       var item = document.createElement("div");
       item.className = "cluster-legend-item";
-      var swatch = document.createElement("span");
-      swatch.className = "swatch";
-      swatch.style.background = "hsl(" + cluster.hue + " " + cluster.sat + "% " + cluster.light + "%)";
+
+      var picker = document.createElement("input");
+      picker.type = "color";
+      picker.className = "swatch-picker";
+      picker.value = hslToHex(colorBase.hue, colorBase.sat, colorBase.light);
+      picker.title = "Vaihda ryhmän \"" + cluster.label + "\" väri";
+      picker.addEventListener("input", function () {
+        state.clusterColors[cluster.key] = hexToHsl(picker.value);
+        render();
+        save();
+      });
+
       var name = document.createElement("span");
       name.className = "name";
       name.textContent = cluster.label;
       var total = document.createElement("span");
       total.className = "total";
       total.textContent = totalArea + " m²";
-      item.appendChild(swatch);
+      item.appendChild(picker);
       item.appendChild(name);
       item.appendChild(total);
       clusterLegend.appendChild(item);
@@ -983,6 +1149,47 @@
     newStoreySelect.innerHTML = storeyOptionsHtml(prev ? parseInt(prev, 10) : 1);
   }
 
+  function populateLinkRoomSelects() {
+    [linkRoomA, linkRoomB].forEach(function (sel) {
+      var prev = sel.value;
+      sel.innerHTML = "";
+      state.rooms
+        .slice()
+        .sort(function (a, b) { return a.name.localeCompare(b.name, "fi"); })
+        .forEach(function (r) {
+          var opt = document.createElement("option");
+          opt.value = r.id;
+          opt.textContent = r.name;
+          sel.appendChild(opt);
+        });
+      if (prev && state.rooms.some(function (r) { return r.id === prev; })) sel.value = prev;
+    });
+  }
+
+  function updateCustomLinksList() {
+    customLinksList.innerHTML = "";
+    state.customLinks.forEach(function (link) {
+      var a = state.rooms.find(function (r) { return r.id === link.a; });
+      var b = state.rooms.find(function (r) { return r.id === link.b; });
+      if (!a || !b) return;
+      var li = document.createElement("li");
+      var span = document.createElement("span");
+      span.textContent = a.name + " ↔ " + b.name;
+      var del = document.createElement("button");
+      del.className = "del-btn";
+      del.textContent = "×";
+      del.title = "Poista yhteys";
+      del.addEventListener("click", function () {
+        state.customLinks = state.customLinks.filter(function (l) { return l.id !== link.id; });
+        render();
+        save();
+      });
+      li.appendChild(span);
+      li.appendChild(del);
+      customLinksList.appendChild(li);
+    });
+  }
+
   // ---------- Actions ----------
   function removeRoom(id) {
     state.rooms = state.rooms.filter(function (r) { return r.id !== id; });
@@ -990,6 +1197,7 @@
     delete state.tiles[id];
     Object.keys(state.storeyPositions).forEach(function (s) { delete state.storeyPositions[s][id]; });
     Object.keys(state.storeyTiles).forEach(function (s) { delete state.storeyTiles[s][id]; });
+    state.customLinks = state.customLinks.filter(function (l) { return l.a !== id && l.b !== id; });
     if (state.rooms.length === 0) {
       render();
       save();
@@ -1014,6 +1222,7 @@
     state.storeyPositions = {};
     state.tiles = {};
     state.storeyTiles = {};
+    state.customLinks = [];
     resetViews();
     render();
     save();
@@ -1021,6 +1230,7 @@
 
   function loadDefaults() {
     state.rooms = defaultRooms();
+    state.customLinks = defaultCustomLinks();
     state.storeyCount = 2;
     document.getElementById("storey-count").textContent = state.storeyCount;
     populateNewStoreySelect();
@@ -1030,7 +1240,7 @@
 
   function exportSvg() {
     var diagrams = buildDiagrams();
-    var interlock = state.shapeMode === "interlock";
+    var isRects = state.shapeMode === "rects";
     var gapX = 24;
     var titleHeight = state.viewMode === "storeys" ? 34 : 0;
     var totalWidth = diagrams.reduce(function (s, d) { return s + d.width; }, 0) + gapX * Math.max(diagrams.length - 1, 0);
@@ -1055,16 +1265,19 @@
       }
       var layout = d.getLayout();
 
-      if (!interlock) {
-        computeLinks(d.rooms).forEach(function (l) {
-          var pa = layout[l.source], pb = layout[l.target];
-          if (!pa || !pb) return;
-          g.appendChild(svgEl("line", {
-            x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y,
-            stroke: "#b9b0a3", "stroke-width": "5", "stroke-linecap": "round", opacity: "0.55"
-          }));
-        });
-      }
+      computeAllLinks(d.rooms).forEach(function (l) {
+        var pa = layout[l.source], pb = layout[l.target];
+        if (!pa || !pb) return;
+        var cxA = isRects ? pa.x + pa.w / 2 : pa.x, cyA = isRects ? pa.y + pa.h / 2 : pa.y;
+        var cxB = isRects ? pb.x + pb.w / 2 : pb.x, cyB = isRects ? pb.y + pb.h / 2 : pb.y;
+        g.appendChild(svgEl("line", {
+          x1: cxA, y1: cyA, x2: cxB, y2: cyB,
+          stroke: l.custom ? "#b5573f" : "#b9b0a3",
+          "stroke-width": "5", "stroke-linecap": "round",
+          opacity: l.custom ? "0.8" : "0.55",
+          "stroke-dasharray": l.custom ? "2 9" : ""
+        }));
+      });
 
       d.rooms.forEach(function (r) {
         var item = layout[r.id];
@@ -1072,33 +1285,32 @@
         var cluster = clusterOf(r.cluster);
         var isTechnical = cluster.key === "tekniset";
 
-        if (interlock) {
-          var pathAttrs = {
-            d: item.path, fill: colorForRoom(r), "fill-opacity": "0.92", "fill-rule": "evenodd",
-            stroke: isTechnical ? "#726c62" : "#faf5ef", "stroke-width": isTechnical ? "2.5" : "3"
+        if (isRects) {
+          var rect = item;
+          var pad = 1.5;
+          var rectAttrs = {
+            x: rect.x + pad, y: rect.y + pad,
+            width: Math.max(0, rect.w - pad * 2), height: Math.max(0, rect.h - pad * 2),
+            fill: colorForRoom(r), "fill-opacity": "0.9",
+            stroke: isTechnical ? "#726c62" : "rgba(0,0,0,0.18)",
+            "stroke-width": isTechnical ? "2" : "1.5"
           };
-          if (isTechnical) pathAttrs["stroke-dasharray"] = "6 4";
-          g.appendChild(svgEl("path", pathAttrs));
+          if (isTechnical) rectAttrs["stroke-dasharray"] = "6 4";
+          g.appendChild(svgEl("rect", rectAttrs));
 
-          var clipId = "export-clip-" + diagramIdx + "-" + r.id.replace(/[^a-zA-Z0-9_-]/g, "");
-          var clipPath = svgEl("clipPath", { id: clipId });
-          clipPath.appendChild(svgEl("path", { d: item.path, "fill-rule": "evenodd" }));
-          exportDefs.appendChild(clipPath);
-          var labelGroup = svgEl("g", { "clip-path": "url(#" + clipId + ")" });
+          var exClipId = "export-rect-clip-" + diagramIdx + "-" + r.id.replace(/[^a-zA-Z0-9_-]/g, "");
+          var exClip = svgEl("clipPath", { id: exClipId });
+          exClip.appendChild(svgEl("rect", { x: rect.x, y: rect.y, width: rect.w, height: rect.h }));
+          exportDefs.appendChild(exClip);
+          var labelGroup = svgEl("g", { "clip-path": "url(#" + exClipId + ")" });
 
-          var minDim = Math.min(item.bboxW, item.bboxH);
-          if (minDim >= 40) {
-            var l1 = svgEl("text", { x: item.labelX, y: item.labelY - 6, "text-anchor": "middle", "font-size": "13", "font-weight": "700", fill: "#2c2622" });
-            l1.textContent = r.name;
-            var l2 = svgEl("text", { x: item.labelX, y: item.labelY + 12, "text-anchor": "middle", "font-size": "11", fill: "#4a433c" });
-            l2.textContent = r.area + " m²";
-            labelGroup.appendChild(l1);
-            labelGroup.appendChild(l2);
-          } else if (minDim >= 22) {
-            var l3 = svgEl("text", { x: item.labelX, y: item.labelY + 4, "text-anchor": "middle", "font-size": "11", "font-weight": "700", fill: "#2c2622" });
-            l3.textContent = r.name;
-            labelGroup.appendChild(l3);
-          }
+          var cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
+          var l1 = svgEl("text", { x: cx, y: cy - 6, "text-anchor": "middle", "font-size": "13", "font-weight": "700", fill: "#2c2622" });
+          l1.textContent = r.name;
+          var l2 = svgEl("text", { x: cx, y: cy + 12, "text-anchor": "middle", "font-size": "11", fill: "#4a433c" });
+          l2.textContent = r.area + " m²";
+          labelGroup.appendChild(l1);
+          labelGroup.appendChild(l2);
           g.appendChild(labelGroup);
         } else {
           var circleAttrs = {
@@ -1166,12 +1378,34 @@
     nameEl.focus();
   });
 
-  var legendToggle = document.getElementById("legend-toggle");
-  var legendBody = document.getElementById("legend-body");
-  legendToggle.addEventListener("click", function () {
-    var expanded = legendToggle.getAttribute("aria-expanded") === "true";
-    legendToggle.setAttribute("aria-expanded", String(!expanded));
-    legendBody.classList.toggle("collapsed", expanded);
+  function wireCollapsible(toggleId, bodyId) {
+    var toggle = document.getElementById(toggleId);
+    var body = document.getElementById(bodyId);
+    toggle.addEventListener("click", function () {
+      var expanded = toggle.getAttribute("aria-expanded") === "true";
+      toggle.setAttribute("aria-expanded", String(!expanded));
+      body.classList.toggle("collapsed", expanded);
+    });
+  }
+  wireCollapsible("legend-toggle", "legend-body");
+  wireCollapsible("links-toggle", "links-body");
+
+  document.getElementById("link-add-btn").addEventListener("click", function () {
+    var a = linkRoomA.value, b = linkRoomB.value;
+    if (!a || !b || a === b) return;
+    var exists = state.customLinks.some(function (l) {
+      return (l.a === a && l.b === b) || (l.a === b && l.b === a);
+    });
+    if (exists) return;
+    state.customLinks.push({ id: "link-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), a: a, b: b });
+    render();
+    save();
+  });
+
+  document.getElementById("reset-colors-btn").addEventListener("click", function () {
+    state.clusterColors = {};
+    render();
+    save();
   });
 
   var viewToggle = document.getElementById("view-toggle");
@@ -1184,7 +1418,7 @@
     viewToggle.querySelectorAll(".toggle-btn").forEach(function (b) {
       b.classList.toggle("active", b === btn);
     });
-    repackAll();
+    ensureLayouts();
   });
 
   var shapeToggle = document.getElementById("shape-toggle");
@@ -1197,7 +1431,7 @@
     shapeToggle.querySelectorAll(".toggle-btn").forEach(function (b) {
       b.classList.toggle("active", b === btn);
     });
-    repackAll();
+    ensureLayouts();
   });
 
   var storeyCountEl = document.getElementById("storey-count");
@@ -1210,7 +1444,7 @@
     state.storeyCount = n;
     storeyCountEl.textContent = n;
     populateNewStoreySelect();
-    repackAll();
+    ensureLayouts();
   }
   document.getElementById("storey-plus").addEventListener("click", function () { setStoreyCount(state.storeyCount + 1); });
   document.getElementById("storey-minus").addEventListener("click", function () { setStoreyCount(state.storeyCount - 1); });
@@ -1224,7 +1458,7 @@
   var resizeTimer = null;
   window.addEventListener("resize", function () {
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(repackAll, 200);
+    resizeTimer = setTimeout(ensureLayouts, 200);
   });
 
   // ---------- Init ----------
@@ -1241,17 +1475,7 @@
       b.classList.toggle("active", b.dataset.shape === state.shapeMode);
     });
     populateNewStoreySelect();
-    var currentLayoutEmpty = state.viewMode === "combined"
-      ? Object.keys(state.shapeMode === "interlock" ? state.tiles : state.positions).length === 0
-      : getStoreyNumbers().every(function (s) {
-        var bucket = state.shapeMode === "interlock" ? state.storeyTiles : state.storeyPositions;
-        return !bucket[s] || Object.keys(bucket[s]).length === 0;
-      });
-    if (state.rooms.length > 0 && currentLayoutEmpty) {
-      repackAll();
-    } else {
-      render();
-    }
+    ensureLayouts();
   } else {
     populateNewStoreySelect();
     loadDefaults();

@@ -23,7 +23,7 @@
     </div>
     <div class="view-toggle" id="shape-toggle" role="group" aria-label="Muoto">
       <button type="button" class="toggle-btn active" data-shape="circles">Kuplat</button>
-      <button type="button" class="toggle-btn" data-shape="interlock">Palapeli</button>
+      <button type="button" class="toggle-btn" data-shape="rects">Pohjapiirros</button>
     </div>
     <div class="storey-stepper" id="storey-stepper" title="Kerrosten määrä">
       <span>Kerroksia</span>
@@ -78,13 +78,30 @@
       </button>
       <div id="legend-body" class="legend-body">
         <div id="cluster-legend" class="cluster-legend"></div>
+        <button id="reset-colors-btn" class="link-btn reset-colors-btn">Palauta oletusvärit</button>
         <ul class="assumptions">
-          <li>Kukin toimintoryhmä (esim. Aula, Tapahtumatilat) saa oman värisävynsä, ja ryhmän tilat vaihtelevat saman sävyn sisällä.</li>
+          <li>Kukin toimintoryhmä (esim. Aula, Tapahtumatilat) saa oman värisävynsä, ja ryhmän tilat vaihtelevat saman sävyn sisällä. Klikkaa väripalloa vaihtaaksesi ryhmän värin.</li>
           <li>Ryhmän suurin tila toimii solmuna, johon muut saman ryhmän tilat kytkeytyvät.</li>
           <li>Kerroksittain-näkymä jakaa tilat omiin kaavioihinsa valitun kerrosjaon mukaan.</li>
-          <li>Palapeli-muoto laskee tiloille toisiinsa lomittuvat, aukottomat muodot (myös L-kirjaimen mallisia) pinta-alojen mukaan; muotoja ei voi raahata käsin, vaan "Järjestä uudelleen" laskee ne uusiksi.</li>
+          <li>Pohjapiirros-muoto jakaa tilat suoraviivaisiksi, aukottomiksi suorakaiteiksi pinta-alojen mukaan. Vedä kulmista muuttaaksesi huoneen kokoa — m² päivittyy automaattisesti. Vedä keskeltä siirtääksesi.</li>
+          <li>m²-sarakkeen luku on muokattavissa myös suoraan taulukossa.</li>
           <li>Hiiren rullalla zoomaa kursorin kohdalta, ja tyhjää kangasta raahaamalla siirtää näkymää.</li>
         </ul>
+      </div>
+    </div>
+
+    <div class="legend-section">
+      <button id="links-toggle" class="legend-toggle" aria-expanded="true">
+        <span class="chevron">▼</span> Omat yhteydet
+      </button>
+      <div id="links-body" class="legend-body">
+        <p class="links-hint">Lisää yhteys kahden tilan välille vaikka ne olisivat eri ryhmissä (esim. Jätehuone ↔ Liiketilat).</p>
+        <div class="link-form">
+          <select id="link-room-a"></select>
+          <select id="link-room-b"></select>
+          <button type="button" id="link-add-btn" class="btn btn-small">Yhdistä</button>
+        </div>
+        <ul id="custom-links-list" class="custom-links-list"></ul>
       </div>
     </div>
   </aside>

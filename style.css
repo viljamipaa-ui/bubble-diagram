@@ -250,10 +250,22 @@ body {
 .room-table tbody tr:hover { background: var(--cream); }
 
 .room-table td.name { font-weight: 600; }
-.room-table td.area { text-align: center; color: var(--ink-soft); white-space: nowrap; }
+.room-table td.area { text-align: center; white-space: nowrap; }
 .room-table td.type { text-align: center; }
 .room-table td.storey { text-align: center; }
 .room-table td.action { text-align: center; width: 22px; }
+
+.area-input {
+  width: 44px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11.5px;
+  padding: 2px 2px;
+  font-family: inherit;
+  background: var(--paper);
+  color: var(--ink);
+}
 
 .storey-select {
   border: 1px solid var(--border);
@@ -397,13 +409,6 @@ body {
   color: var(--ink);
 }
 
-.cluster-legend-item .swatch {
-  width: 11px;
-  height: 11px;
-  border-radius: 3px;
-  flex-shrink: 0;
-}
-
 .cluster-legend-item .name {
   flex: 1;
   font-weight: 600;
@@ -415,12 +420,77 @@ body {
   font-size: 11px;
 }
 
+.swatch-picker {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  background: none;
+  flex-shrink: 0;
+}
+
+.swatch-picker::-webkit-color-swatch-wrapper { padding: 0; }
+.swatch-picker::-webkit-color-swatch { border: none; border-radius: 3px; }
+.swatch-picker::-moz-color-swatch { border: none; border-radius: 3px; }
+
+.reset-colors-btn {
+  display: block;
+  margin-bottom: 12px;
+}
+
 .assumptions {
   margin: 0;
   padding-left: 16px;
   font-size: 11.5px;
   color: var(--ink-soft);
   line-height: 1.6;
+}
+
+.links-hint {
+  font-size: 11px;
+  color: var(--ink-soft);
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+
+.link-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.link-form select {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 5px;
+  font-size: 11px;
+  font-family: inherit;
+  min-width: 0;
+}
+
+.link-form button { grid-column: 1 / -1; }
+
+.custom-links-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.custom-links-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11.5px;
+  background: var(--cream);
+  border-radius: 6px;
+  padding: 5px 8px;
 }
 
 /* ---------- Canvas ---------- */
@@ -507,6 +577,27 @@ body {
   stroke-width: 5;
   stroke-linecap: round;
   opacity: 0.55;
+}
+
+.link-line-custom {
+  stroke: var(--accent);
+  stroke-dasharray: 2 9;
+  opacity: 0.85;
+}
+
+.room-rect { cursor: grab; }
+.room-rect:active { cursor: grabbing; }
+
+.resize-handle {
+  fill: #ffffff;
+  stroke: #2c2622;
+  stroke-width: 1;
+  cursor: nwse-resize;
+}
+
+.resize-handle[data-corner="tr"],
+.resize-handle[data-corner="bl"] {
+  cursor: nesw-resize;
 }
 
 .empty-state[hidden] { display: none; }
